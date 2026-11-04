@@ -95,6 +95,37 @@ class Checked(NeoTestCase):
         self.assertEqual(self.mod.unchecked("abc"), 3)
 
 
+class FrozenValues(NeoTestCase):
+    SOURCE = """
+        import neo
+        val PRICES = [100, 200]
+        val LIMITS = {"daily": 500}
+        @neo.checked
+        def total(xs: val list[int], limits: val dict[str, int], tags: val set[str] | None = None) -> int:
+            return sum(xs)
+        @neo.checked
+        def grow(xs: list[int]) -> list[int]:
+            xs.append(0)
+            return xs
+        """
+
+    def test_a_val_parameter_takes_frozen_values(self):
+        result = self.assertClean(self.SOURCE)
+        self.assertIn(
+            "def total(xs: neo.runtime.Sequence[int], limits: neo.runtime.Mapping[str, int], "
+            "tags: neo.runtime.AbstractSet[str] | None = None) -> int:",
+            result.code,
+        )
+        mod = load(self.SOURCE)
+        self.assertEqual(mod.total(mod.PRICES, mod.LIMITS, frozenset({"a"})), 300)
+        self.assertEqual(mod.total([1, 2], {"daily": 1}), 3)
+
+    def test_a_plain_list_parameter_still_wants_a_list(self):
+        mod = load(self.SOURCE)
+        with self.assertRaisesRegex(CheckError, "must be list, not tuple"):
+            mod.grow(mod.PRICES)
+
+
 class ChecksOff(NeoTestCase):
     def test_neo_checks_0_returns_the_function_untouched(self):
         with mock.patch.dict(os.environ, {"NEO_CHECKS": "0"}):

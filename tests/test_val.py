@@ -54,6 +54,66 @@ class ValRebinding(NeoTestCase):
         self.assertError("if True: val x = 1; x = 2\n", "NEO1001")
 
 
+class FrozenValChanges(NeoTestCase):
+    def test_changing_a_frozen_val_is_an_error(self):
+        changes = [
+            "PRICES.append(3)",
+            "PRICES[0] = 9",
+            "del PRICES[0]",
+            "CONFIG.update(port=80)",
+            "CONFIG['port'] = 80",
+            "TAGS.add('x')",
+            "SQUARES.sort()",
+            "A.append(1)",
+            "def later():\n    PRICES.append(3)",
+        ]
+        header = (
+            "val PRICES = [1, 2]\nval CONFIG = {'host': 'h'}\nval TAGS = set()\n"
+            "val SQUARES = [i * i for i in range(3)]\nval A, B = [1], {2}\n"
+        )
+        for change in changes:
+            with self.subTest(change):
+                result = self.assertError(header + change + "\n", "NEO1005")
+                self.assertIn("was frozen to a", result.errors[0].message)
+
+    def test_changing_a_frozen_part_of_a_val_is_an_error(self):
+        header = "val CONFIG = {'db': {'host': 'x'}, 'ports': [80], 'pairs': [[1, 2]]}\n"
+        for change in ["CONFIG['db']['host'] = 'y'", "CONFIG['ports'].append(443)", "CONFIG['pairs'][0].append(3)"]:
+            with self.subTest(change):
+                result = self.assertError(header + change + "\n", "NEO1005")
+                self.assertIn("(part of val 'CONFIG')", result.errors[0].message)
+
+    def test_an_ordinary_object_inside_a_frozen_val_can_change(self):
+        self.assertClean(
+            "db = {'host': 'x'}\n"
+            "val CONFIG = {'db': db, 'ports': [80]}\n"
+            "CONFIG['db']['host'] = 'y'\n"
+            "key = 'db'\n"
+            "CONFIG[key]['host'] = 'z'\n"
+        )
+
+    def test_reading_a_frozen_val_or_changing_anything_else_is_fine(self):
+        self.assertClean(
+            """
+            import collections
+            val PRICES = [1, 2]
+            val CONFIG = {'host': 'h'}
+            var items = [1]
+            val counts = collections.Counter()
+            class Cache:
+                def clear(self): pass
+            val cache = Cache()
+            items.append(PRICES.count(1) + PRICES.index(2) + len(CONFIG.get('host', '')))
+            counts.update('abc')
+            cache.clear()
+            def shadow():
+                PRICES = []
+                PRICES.append(1)
+                return PRICES
+            """
+        )
+
+
 class Declarations(NeoTestCase):
     def test_val_without_a_value_is_an_error(self):
         self.assertError("val x: int\n", "NEO1003")
@@ -195,6 +255,59 @@ class RewriteDefaults(NeoTestCase):
     def test_neo_cache_is_still_left_alone(self):
         source = "def lookup(key, _cache={}):  # neo: cache\n    return _cache\n"
         self.assertEqual(self.assertClean(source, rewrite_defaults=True).code, HEADER + source)
+
+    def test_a_default_that_reads_other_names_is_not_moved(self):
+        # Moved into the body, [UNIT] would raise NameError and [seq] would read seq at call time.
+        source = """
+            class C:
+                UNIT = 10
+                def scaled(self, factor=[UNIT]):
+                    return factor
+            seq = 1
+            def ticket(ids=[seq]):
+                return ids
+            seq = 2
+            """
+        result = self.assertCompiles(source, rewrite_defaults=True)
+        messages = [w.message for w in result.warnings]
+        self.assertEqual([w.code for w in result.warnings], ["NEO1004", "NEO1004"])
+        self.assertIn("because it uses 'UNIT'", messages[0])
+        self.assertIn("because it uses 'seq'", messages[1])
+        self.assertEqual(result.explanations, [])
+        mod = load(source, rewrite_defaults=True)
+        self.assertEqual(mod.C().scaled(), [10])
+        self.assertEqual(mod.ticket(), [1])
+
+    def test_a_default_whose_name_the_function_rebinds_is_not_moved(self):
+        # In the body, 'list' is the local assigned below and 'set' is the parameter.
+        source = """
+            def a(x=list()):
+                list = [9]
+                return x, list
+            def b(items=set(), set=None):
+                return items
+            """
+        result = self.assertCompiles(source, rewrite_defaults=True)
+        self.assertEqual([w.code for w in result.warnings], ["NEO1004", "NEO1004"])
+        self.assertIn("because it uses 'list'", result.warnings[0].message)
+        self.assertIn("because it uses 'set'", result.warnings[1].message)
+        mod = load(source, rewrite_defaults=True)
+        self.assertEqual(mod.a(), ([], [9]))
+        self.assertEqual(mod.b(), set())
+
+    def test_builtins_imports_and_its_own_loop_variables_are_moved(self):
+        source = """
+            import collections
+            def a(x=[1, 2]): return x
+            def b(x=collections.deque()): return x
+            def c(x=[i * i for i in range(3)]): return x
+            def d(x=list(range(2))): return x
+            """
+        result = self.assertClean(source, rewrite_defaults=True)
+        self.assertEqual(len(result.explanations), 4)
+        mod = load(source, rewrite_defaults=True)
+        self.assertEqual(mod.c(), [0, 1, 4])
+        self.assertIsNot(mod.a(), mod.a())
 
     def test_a_lambda_cannot_be_rewritten(self):
         result = self.assertWarning("f = lambda x=[]: x\n", "NEO1004", rewrite_defaults=True)

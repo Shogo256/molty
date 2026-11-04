@@ -1,6 +1,6 @@
 """Python Neo: a strict superset of Python that turns common Python traps into errors."""
 
-from neo.runtime import checked, scope
+from neo.runtime import checked, isolated, scope
 
-__all__ = ["checked", "scope"]
+__all__ = ["checked", "isolated", "scope"]
 __version__ = "0.1.0"

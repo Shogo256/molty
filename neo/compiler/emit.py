@@ -17,6 +17,13 @@ from neo.compiler.tokens import Prepared, split_lines
 
 MAPPING_PROXY = "neo.runtime.MappingProxyType"
 MAPPING = "neo.runtime.Mapping"
+# A val parameter promises not to mutate, so it takes these read-only types,
+# which frozen values (tuple, MappingProxyType, frozenset) also satisfy.
+READ_ONLY = {
+    "list": "neo.runtime.Sequence", "typing.List": "neo.runtime.Sequence",
+    "dict": MAPPING, "typing.Dict": MAPPING,
+    "set": "neo.runtime.AbstractSet", "typing.Set": "neo.runtime.AbstractSet",
+}
 
 _CODING = re.compile(r"^[ \t\f]*#.*?coding[:=]")
 
@@ -105,6 +112,9 @@ class _Emitter:
             by_function.setdefault(item.func, []).append(item)
         for items in by_function.values():
             self._rewrite_mutable_defaults(items)
+        for arg in self.analysis.val_params:
+            if arg.annotation is not None and self._read_only_annotation(arg.annotation):
+                self._explain(arg, f"val parameter '{arg.arg}': annotation widened to a read-only type")
         for task in self.analysis.tasks:
             self._explain(task, f"task '{task.name}' compiles to a coroutine (async def)")
         for info in self.analysis.computes:
@@ -232,6 +242,28 @@ class _Emitter:
     def _has_trailing_comma(self, last: ast.expr, close: int) -> bool:
         between = self.text.source[self.text.end(last) : close]
         return any("," in line.split("#", 1)[0] for line in between.splitlines())
+
+    def _read_only_annotation(self, node: ast.expr) -> bool:
+        """``list[int]`` -> ``neo.runtime.Sequence[int]`` and so on, nested types included."""
+        if isinstance(node, ast.BinOp) and isinstance(node.op, ast.BitOr):
+            return self._read_only_annotation(node.left) | self._read_only_annotation(node.right)
+        if isinstance(node, ast.Subscript):
+            base = self.names.qualified_name(node.value)
+            args = node.slice.elts if isinstance(node.slice, ast.Tuple) else [node.slice]
+            if base in ("dict", "typing.Dict") and len(args) == 2:
+                args = args[1:]  # keys stay as they are
+            changed = any([self._read_only_annotation(arg) for arg in args])
+            if base in READ_ONLY:
+                self._replace(node.value, READ_ONLY[base])
+                self.uses_runtime = True
+                return True
+            return changed
+        base = self.names.qualified_name(node)
+        if base in READ_ONLY:
+            self._replace(node, READ_ONLY[base])
+            self.uses_runtime = True
+            return True
+        return False
 
     def _freeze_annotation(self, node: ast.expr) -> None:
         """Rewrite ``list[int]`` to ``tuple[int, ...]`` and so on, to match the frozen value."""

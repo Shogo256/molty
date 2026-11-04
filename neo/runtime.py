@@ -14,12 +14,16 @@ import importlib
 import inspect
 import multiprocessing
 import os
+import pickle
 import sys
 import threading
+import traceback
 import types
 import typing
-from collections.abc import Awaitable, Callable, Coroutine, Mapping
-from concurrent.futures import ProcessPoolExecutor
+from collections.abc import Awaitable, Callable, Coroutine, Mapping, Sequence
+from collections.abc import Set as AbstractSet
+from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
+from concurrent.futures.process import BrokenProcessPool
 from dataclasses import dataclass
 from multiprocessing.reduction import ForkingPickler
 from types import MappingProxyType
@@ -31,7 +35,8 @@ else:
     annotationlib = None
 
 __all__ = [
-    "CheckError", "ComputeFunction", "Mapping", "MappingProxyType", "PickleCheckError", "Scope",
+    "AbstractSet", "CheckError", "ComputeError", "ComputeFunction", "Mapping", "MappingProxyType", "PickleCheckError", "Scope",
+    "Sequence", "isolated",
     "checked", "checks_enabled", "compute", "compute_pool", "scope", "shutdown_compute_pool",
 ]
 
@@ -245,6 +250,12 @@ class PickleCheckError(TypeError):
     """NEO2004 at run time: a compute argument or result cannot be pickled."""
 
 
+class ComputeError(Exception):
+    """A compute job ended in a way that cannot be handed back as it is: it
+    called ``sys.exit()``, or raised an exception the caller cannot rebuild.
+    The worker's traceback, original exception included, comes with it."""
+
+
 _pool: ProcessPoolExecutor | None = None
 _pool_lock = threading.Lock()
 
@@ -265,11 +276,23 @@ def compute_pool() -> ProcessPoolExecutor:
 
 
 def shutdown_compute_pool(wait: bool = True) -> None:
-    global _pool
+    global _pool, _waiters
     with _pool_lock:
         pool, _pool = _pool, None
+        waiters, _waiters = _waiters, None
     if pool is not None:
         pool.shutdown(wait=wait)
+    if waiters is not None:
+        waiters.shutdown(wait=wait)
+
+
+def _discard_broken_pool(pool: ProcessPoolExecutor) -> None:
+    """A worker died, which breaks the whole pool; the next call gets a new one."""
+    global _pool
+    with _pool_lock:
+        if _pool is pool:  # another call may already have replaced it
+            _pool = None
+    pool.shutdown(wait=False, cancel_futures=True)
 
 
 def _ensure_picklable(value: Any, what: str) -> None:
@@ -286,9 +309,31 @@ def _lookup(module: str, qualname: str) -> Any:
     return found
 
 
+def _round_trips(exc: BaseException) -> bool:
+    try:
+        pickle.loads(ForkingPickler.dumps(exc))
+    except Exception:
+        return False
+    return True
+
+
 def _invoke(function: ComputeFunction[..., Any], args: tuple[Any, ...], kwargs: dict[str, Any]) -> Any:
     """Runs in the worker process."""
-    result = function.__wrapped__(*args, **kwargs)
+    name = function.__qualname__
+    try:
+        result = function.__wrapped__(*args, **kwargs)
+    except SystemExit as exc:
+        # Passed on as it is, SystemExit would stop the caller's whole program.
+        raise ComputeError(f"compute '{name}' called sys.exit({exc.code!r})")
+    except Exception as exc:
+        # An exception the caller cannot rebuild (say, one whose __init__ takes
+        # two arguments) would otherwise break the pool for every other job.
+        if not _round_trips(exc):
+            raise ComputeError(
+                f"compute '{name}' raised {type(exc).__qualname__}: {exc} "
+                "(the exception itself cannot be sent back, so this one stands in for it)"
+            )
+        raise
     if function.check_result:
         _ensure_picklable(result, f"the result of compute '{function.__qualname__}'")
     return result
@@ -298,6 +343,102 @@ def _signature(fn: Callable[..., Any]) -> inspect.Signature:
     if annotationlib is not None:
         return inspect.signature(fn, annotation_format=annotationlib.Format.FORWARDREF)
     return inspect.signature(fn)
+
+
+# --- isolated compute ---------------------------------------------------------------
+#
+# The shared pool cannot stop one job: it does not say which worker runs it,
+# and killing a worker breaks every other job.  ``@neo.isolated`` pays for a
+# process start on each call and gets a job that can really be stopped.
+
+
+def isolated(fn: F) -> F:
+    """Run each call of this ``compute def`` in a process of its own.
+
+    Cancelling the call, or letting it time out, kills that process: the CPU
+    is free again at once, and no other call is touched.
+    """
+    setattr(fn, "__neo_isolated__", True)
+    return fn
+
+
+_waiters: ThreadPoolExecutor | None = None
+
+
+def _isolated_waiters() -> ThreadPoolExecutor:
+    """Threads that start and wait on isolated processes; their number caps how
+    many isolated processes run at once."""
+    global _waiters
+    with _pool_lock:
+        if _waiters is None:
+            _waiters = ThreadPoolExecutor(max_workers=os.cpu_count() or 1, thread_name_prefix="neo-isolated")
+        return _waiters
+
+
+class _RemoteTraceback(Exception):
+    def __str__(self) -> str:
+        return str(self.args[0])
+
+
+def _isolated_main(sender: Any, function: ComputeFunction[..., Any], args: tuple[Any, ...], kwargs: dict[str, Any]) -> None:
+    """Runs in the isolated process: one call, one answer through the pipe."""
+    try:
+        message = (True, _invoke(function, args, kwargs), "")
+    except BaseException as exc:
+        message = (False, exc, traceback.format_exc())
+    try:
+        sender.send(message)
+    except Exception as exc:
+        what = "the result" if message[0] else "the exception"
+        error = PickleCheckError(f"NEO2004: {what} of compute '{function.__qualname__}' cannot be pickled: {exc}")
+        sender.send((False, error, ""))
+    finally:
+        sender.close()
+
+
+class _IsolatedCall:
+    """One isolated call.  A waiter thread starts and reaps the process; a
+    cancelled caller kills it."""
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._process: Any = None
+        self._cancelled = False
+
+    def cancel(self) -> None:
+        with self._lock:
+            self._cancelled = True
+            if self._process is not None:
+                self._process.kill()
+
+    def run(self, function: ComputeFunction[..., Any], args: tuple[Any, ...], kwargs: dict[str, Any]) -> Any:
+        # typeshed declares get_context() as BaseContext, which lacks Process.
+        context: Any = multiprocessing.get_context(_start_method())
+        receiver, sender = context.Pipe(duplex=False)
+        with self._lock:
+            if self._cancelled:  # cancelled before this thread got to it
+                receiver.close()
+                sender.close()
+                return None
+            process = self._process = context.Process(target=_isolated_main, args=(sender, function, args, kwargs))
+            process.start()
+        sender.close()
+        try:
+            ok, value, remote = receiver.recv()
+        except EOFError:  # killed, or died without answering
+            ok, value, remote = None, None, ""
+        finally:
+            receiver.close()
+            process.join()  # reaped, so no zombie is left behind
+        if ok is None:
+            raise BrokenProcessPool(
+                f"the process of isolated compute '{function.__qualname__}' exited with code {process.exitcode}"
+            )
+        if not ok:
+            if remote:
+                value.__cause__ = _RemoteTraceback(remote)
+            raise value
+        return value
 
 
 class ComputeFunction(Generic[P, R]):
@@ -316,6 +457,7 @@ class ComputeFunction(Generic[P, R]):
         enabled = checks_enabled()
         self.check_args = check_args if enabled else ()
         self.check_result = check_result and enabled
+        self.isolated = bool(getattr(fn, "__neo_isolated__", False))
         self._signature: inspect.Signature | None = None
 
     def __call__(self, *args: P.args, **kwargs: P.kwargs) -> Coroutine[Any, Any, R]:
@@ -325,7 +467,21 @@ class ComputeFunction(Generic[P, R]):
 
     async def _run(self, args: tuple[Any, ...], kwargs: dict[str, Any]) -> R:
         loop = asyncio.get_running_loop()
-        return await loop.run_in_executor(compute_pool(), functools.partial(_invoke, self, args, kwargs))
+        if self.isolated:
+            call = _IsolatedCall()
+            try:
+                return await loop.run_in_executor(_isolated_waiters(), call.run, self, args, kwargs)
+            except asyncio.CancelledError:
+                call.cancel()
+                raise
+        pool = compute_pool()
+        try:
+            return await loop.run_in_executor(pool, functools.partial(_invoke, self, args, kwargs))
+        except BrokenProcessPool:
+            # This call fails and is not retried (it may be what crashed the
+            # worker), but later calls must not inherit the broken pool.
+            _discard_broken_pool(pool)
+            raise
 
     def _check_arguments(self, args: tuple[Any, ...], kwargs: dict[str, Any]) -> None:
         if self._signature is None:

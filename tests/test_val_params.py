@@ -83,7 +83,7 @@ class ValParameters(NeoTestCase):
 
     def test_val_is_stripped_and_nothing_is_copied(self):
         result = compile_neo("def same(items: val list[int], *, key: val str = 'k'):\n    return items\n")
-        self.assertIn("def same(items: list[int], *, key: str = 'k'):", result.code)
+        self.assertIn("def same(items: neo.runtime.Sequence[int], *, key: str = 'k'):", result.code)
         mod = load("def same(items: val list[int]):\n    return items\n")
         mine = [1]
         self.assertIs(mod.same(mine), mine)

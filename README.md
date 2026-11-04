@@ -35,9 +35,9 @@ print(add(3))  # [1, 2, 3]                  default [] of 'items' is created
 # nothing tells you                       # neoc tells you before it runs
 ```
 
-neoc does not change what the code means. The `.py` it writes behaves exactly
-like the source, and the warning tells you about the trap. There are two ways
-to act on it:
+By default neoc does not change what the code means. The `.py` it writes
+behaves exactly like the source, and the warning tells you about the trap.
+There are two ways to act on it:
 
 ```python
 def lookup(key, _cache={}):  # neo: cache
@@ -48,7 +48,8 @@ def lookup(key, _cache={}):  # neo: cache
 neoc --rewrite-defaults app.neo.py   # neoc gives every call a fresh list
 ```
 
-With `--rewrite-defaults`, neoc writes:
+`--rewrite-defaults` changes the meaning on purpose, and in one way only:
+every call gets a fresh object. With it, neoc writes:
 
 ```python
 def add(item, items: list | None = None):
@@ -85,6 +86,7 @@ neoc app.neo.py -o -         # print to stdout
 neoc app.neo.py --explain    # list every rewrite neoc made
 neoc app.neo.py --rewrite-defaults   # fix mutable defaults instead of warning
 neoc app.neo.py -q           # no success line
+neoc app.neo.py --force      # overwrite an app.py that neoc did not write
 neoc --version
 ```
 
@@ -98,6 +100,21 @@ line on stderr:
 
 When the output is piped, as in CI, that line is left out, and
 `neoc --version` prints a plain `neoc 0.1.0` instead of the logo.
+
+neoc refuses to write a `.py` file, and exits with 1, in these cases:
+
+* the file is a symbolic link
+* the file is one of the sources, as with `-o app.neo.py`
+* the file is an existing regular file that neoc did not generate (`--force`
+  overwrites it); `-o /dev/null`, to see only the diagnostics, is fine
+
+When neoc walks a directory, it skips symbolic links, so it never reads
+files outside the tree. A file named on the command line is read even if it
+is a link.
+
+neoc also opens the file with `O_NOFOLLOW`, so a link put in place after the
+checks above cannot redirect the write either. Windows has no `O_NOFOLLOW`;
+there, the check before writing is the only guard.
 
 ## What Neo adds
 
@@ -114,8 +131,14 @@ var count = 0
   included: `list` becomes `tuple`, `dict` becomes `MappingProxyType`,
   `set` becomes `frozenset`. The annotation follows, so
   `val xs: list[int] = [1]` becomes `xs: tuple[int, ...] = (1,)`.
-* Method calls on a `val` are not tracked. `config.append(...)` fails at run
-  time with `AttributeError`, because the value is already immutable.
+* Changing a frozen `val` in place, as in `PRICES.append(3)` or
+  `CONFIG["port"] = 80`, is an error (NEO1005); it would fail at run time
+  anyway. So is changing a frozen part of it, as in `CONFIG["db"]["host"] = "y"`.
+  A value you build up step by step belongs in a `var`.
+* A `val` bound to any other object, such as `val cache = LRUCache()`, only
+  promises not to be rebound. Its methods can be called as usual.
+* `json.dumps` does not accept a frozen dict. Convert it first:
+  `json.dumps(dict(config))`.
 * `var` and plain `x = ...` work exactly as in Python.
 
 ### `val` parameters
@@ -131,6 +154,12 @@ of `list`, `dict` and `set` on it (`append`, `update`, `items[k] = v`, `+=`,
 ...), is an error. The full list is `MUTATING_METHODS` in
 `neo/compiler/rules.py`. Callers pass the object as usual; nothing is copied.
 
+Because the function promises not to change the argument, neoc widens its
+annotation to the read-only type: `list[int]` becomes `Sequence[int]`,
+`dict[K, V]` becomes `Mapping[K, V]`, and `set[T]` becomes `AbstractSet[T]`.
+Frozen `val` values (a tuple, a `MappingProxyType`, a `frozenset`) can then be
+passed in, and both `@neo.checked` and mypy accept them.
+
 ### Mutable default arguments
 
 A `list`, `dict` or `set` literal, or a call such as `list()` or
@@ -141,8 +170,13 @@ code is left alone.
   intended. The warning goes away, and the parameter is never rewritten.
 * `neoc --rewrite-defaults` rewrites each unmarked default to a `None`
   default plus a check in the body, as shown above. `--explain` lists every
-  rewrite. Defaults of a `lambda` cannot be rewritten, so they keep the
-  warning.
+  rewrite.
+* It only moves a default whose names are builtins, module-level imports, or
+  the loop variables of a comprehension inside the default. Any other name
+  would mean something else in the function body: a class attribute is not
+  visible there, and a variable would be read at call time instead of when
+  `def` ran. Such a default keeps the warning, and so does a default of a
+  `lambda`.
 
 ### `task`, `compute` and `scope`
 
@@ -163,18 +197,68 @@ task def main(urls: list[str]) -> list[bytes]:
   shared `ProcessPoolExecutor`, so you can `await` it or `spawn` it.
 * `scope()` wraps `asyncio.TaskGroup`. `s.results()` returns the results in
   spawn order once the block has exited. If one spawned task fails, the
-  others are cancelled.
+  others are cancelled, the block raises an `ExceptionGroup`, and
+  `s.results()` is no longer usable. Partial results have to be collected by
+  the tasks themselves.
 * A `compute` that calls a `task` is an error (NEO2001). A `task` that awaits
   a `compute` is fine.
+* A call to a `task` or `compute` whose coroutine never gets run is a warning
+  (NEO2006). That covers using the result in an f-string or an expression,
+  dropping it, and passing it to an ordinary function such as `print(work(n))`.
+  Awaiting it, assigning it, returning it, and passing it to something that
+  runs coroutines (`s.spawn`, `asyncio.run`, `asyncio.gather`,
+  `asyncio.wait_for`, `create_task`, `run_until_complete`, ...) are fine; to
+  hand it to a helper of your own, assign it to a name first. A `compute`
+  calling another `compute` is also NEO2006, because a worker process cannot
+  await. The check covers functions defined in the same file and called by
+  their own name, not through another name such as `f = work`.
+* A job that calls `sys.exit()`, or raises an exception the caller cannot
+  rebuild (one whose `__init__` takes two arguments, say), fails with
+  `neo.runtime.ComputeError` instead. Its message names the original
+  exception, and the worker's traceback comes with it. Other jobs are not
+  affected, and the caller's program keeps running.
+* If a worker process dies (a crash, `os._exit`, running out of memory), the
+  calls in flight fail with `BrokenProcessPool`. The next call starts a fresh
+  pool. A failed call is not retried, since it may be the one that crashed.
+* Cancelling a `compute` call, or letting it time out (`asyncio.wait_for`, a
+  failing scope), stops the waiting but not the work. The job runs to the end
+  and keeps its worker busy, so later `compute` calls can queue behind jobs
+  nobody is waiting for any more.
+* For long jobs that must really stop, put `@neo.isolated` on the
+  `compute def`. Each call then runs in a process of its own, and cancelling
+  or timing out the call kills that process at once, without touching any
+  other call. Starting the process costs about 10 ms per call on Linux
+  (forkserver) and about 170 ms where only spawn exists, as on Windows. At
+  most as many isolated calls run at once as there are CPUs. `@neo.isolated`
+  on anything other than a `compute def` is an error (NEO2007).
+
+  ```python
+  import neo
+
+  @neo.isolated
+  compute def render(job: Job) -> bytes: ...
+  ```
 * Arguments and the result of a `compute` must pickle. Types that are
-  picklable by their hint (`int`, `str`, `bytes`, containers of them, enums,
-  and module-level dataclasses, NamedTuples and TypedDicts) are accepted at
-  compile time with no run-time cost. Types that never pickle (`threading.Lock`,
+  picklable by their hint (`int`, `str`, `bytes`, containers of them with the
+  item types written out, enums, and module-level dataclasses, NamedTuples and
+  TypedDicts) are accepted at compile time with no run-time cost. A bare
+  `dict` or `list` says nothing about its items, so it is checked at run time. Types that never pickle (`threading.Lock`,
   generators, sockets, ...) are an error (NEO2004). Anything else is checked
   when the call is made, and the result is checked in the worker.
+* Stopped with SIGTERM (the default of `kill`, systemd and Docker), Python
+  skips its exit handlers, so the forkserver and idle workers stay behind.
+  Turn SIGTERM into a normal exit when the program starts; Ctrl-C needs
+  nothing.
+
+  ```python
+  import signal, sys
+  signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))
+  ```
 * A `compute def` must be a plain module-level function (NEO2005), because
   worker processes import it by name. As with any `multiprocessing` code,
-  start your program under `if __name__ == "__main__":`.
+  start your program under `if __name__ == "__main__":`, and run it from a
+  file. Code fed through stdin or a REPL fails with confusing errors, because
+  the workers cannot import the main module.
 * Creating a `threading.Thread` inside a `task` or `compute` is a warning
   (NEO2002), and so is `asyncio.create_task` outside a scope (NEO2003).
   Neither is forbidden.
@@ -190,8 +274,10 @@ def scale(xs: list[int], factor: float) -> list[float]: ...
 scale("abc", 2)   # CheckError: scale() argument 'xs' must be list, not str
 ```
 
-Only functions with the decorator are checked. The check is shallow:
-`list[int]` checks for `list` but not its elements.
+Only functions with the decorator are checked, and only their arguments,
+not their return values. The check is shallow: `list[int]` checks for
+`list` but not its elements. It follows `isinstance`, as mypy does, so `True`
+passes where an `int` is expected, and an `int` passes where a `float` is.
 
 ### `NEO_CHECKS=0`
 
@@ -207,11 +293,14 @@ unchanged, and `compute` stops checking picklability.
 | NEO1002 | error   | a `val` parameter is rebound or mutated                      |
 | NEO1003 | error   | malformed `val`/`var` declaration (`val x: int` with no value, `val a.b = 1`, ...) |
 | NEO1004 | warning | a mutable default argument, shared by every call             |
+| NEO1005 | error   | a frozen `val` is changed in place                           |
 | NEO2001 | error   | a `compute` calls a `task`                                   |
 | NEO2002 | warning | `threading.Thread` inside a `task` or `compute`              |
 | NEO2003 | warning | `asyncio.create_task` outside `scope()`                      |
 | NEO2004 | error   | a `compute` argument or result cannot be pickled             |
 | NEO2005 | error   | a `compute def` that is nested, a method, or a generator     |
+| NEO2006 | warning | a `task` or `compute` called but not awaited or handed on    |
+| NEO2007 | error   | `@neo.isolated` on something other than a `compute def`      |
 
 ## Limits of this first version
 
