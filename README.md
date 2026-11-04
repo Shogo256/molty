@@ -99,7 +99,7 @@ line on stderr:
 ```
 
 When the output is piped, as in CI, that line is left out, and
-`moltyc --version` prints a plain `moltyc 0.1.0` instead of the logo.
+`moltyc --version` prints a plain `moltyc` and the version instead of the logo.
 
 moltyc refuses to write a `.py` file, and exits with 1, in these cases:
 
@@ -344,8 +344,8 @@ To release, set the new version in both `pyproject.toml` and
 `molty/__init__.py` (a test checks that they agree), commit, then push a tag:
 
 ```bash
-git tag -a v0.1.1 -m "Molty 0.1.1"
-git push origin main v0.1.1
+git tag -a vX.Y.Z -m "Molty X.Y.Z"
+git push origin main vX.Y.Z
 ```
 
 The `Publish` workflow then tests on Python 3.11 to 3.14, builds, publishes

@@ -12,6 +12,7 @@ from pathlib import Path
 
 from helpers import HEADER, MoltyTestCase, compile_molty
 
+import molty
 from molty.compiler.cli import _write, main
 
 PLAIN = '''\
@@ -128,8 +129,8 @@ class Cli(unittest.TestCase):
     def test_version_shows_the_logo_only_on_a_terminal(self):
         _, out, _ = self.run_main("--version", tty=True)
         self.assertIn("|_|  |_|\\___/|_____|_|   |_|", out)
-        self.assertIn(":>   Molty 0.1.0", out)
-        self.assertEqual(self.run_main("--version")[1], "moltyc 0.1.0\n")
+        self.assertIn(f":>   Molty {molty.__version__}", out)
+        self.assertEqual(self.run_main("--version")[1], f"moltyc {molty.__version__}\n")
 
     def test_refuses_to_write_through_a_symlink(self):
         victim = self.write("victim.txt", "keep me\n")
