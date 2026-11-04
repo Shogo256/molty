@@ -340,6 +340,18 @@ python -m unittest discover -s tests
 The package and the tests use only the standard library. The `molty` package
 passes `mypy --strict`.
 
+To release, set the new version in both `pyproject.toml` and
+`molty/__init__.py` (a test checks that they agree), commit, then push a tag:
+
+```bash
+git tag -a v0.1.1 -m "Molty 0.1.1"
+git push origin main v0.1.1
+```
+
+The `Publish` workflow then tests on Python 3.11 to 3.14, builds, publishes
+to PyPI through trusted publishing (no API token), and creates the GitHub
+release. Started by hand from the Actions tab, it only tests and builds.
+
 ## License
 
 Apache License 2.0. See [LICENSE](LICENSE).
