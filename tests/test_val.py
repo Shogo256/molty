@@ -44,6 +44,42 @@ class ValRebinding(NeoTestCase):
     def test_val_in_a_loop_body_is_one_binding(self):
         self.assertClean("for i in range(3):\n    val y = i * 2\n")
 
+    def test_one_val_per_branch_is_one_binding(self):
+        source = """
+            import sys
+            if len(sys.argv) > 5:
+                val MODE = ["verbose"]
+            elif sys.argv:
+                val MODE = ["normal"]
+            else:
+                val MODE = ["quiet"]
+            match len(sys.argv):
+                case 99:
+                    val LEVEL = 1
+                case _:
+                    val LEVEL = 2
+            def pick(flag):
+                if flag:
+                    val choice = {"a"}
+                else:
+                    val choice = {"b"}
+                return choice
+            """
+        self.assertClean(source)
+        mod = load(source)
+        self.assertEqual((mod.MODE, mod.LEVEL), (("normal",), 2))
+        self.assertEqual(mod.pick(False), frozenset({"b"}))
+
+    def test_a_val_outside_and_inside_a_branch_is_still_an_error(self):
+        self.assertError("val Z = 1\nif True:\n    val Z = 2\n", "NEO1001")
+        self.assertError("if True:\n    val Z = 1\nif False:\n    val Z = 2\n", "NEO1001")
+
+    def test_changing_a_val_that_is_frozen_in_every_branch_is_an_error(self):
+        branches = "import sys\nif sys.argv:\n    val TAGS = ['a']\nelse:\n    val TAGS = ['b']\n"
+        self.assertError(branches + "TAGS.append('c')\n", "NEO1005")
+        mixed = "import sys\nif sys.argv:\n    val TAGS = ['a']\nelse:\n    val TAGS = sys.argv\n"
+        self.assertClean(mixed + "TAGS.append('c')\n")
+
     def test_val_over_a_parameter_is_an_error(self):
         self.assertError("def f(x):\n    val x = 1\n", "NEO1001")
 
@@ -82,6 +118,17 @@ class FrozenValChanges(NeoTestCase):
             with self.subTest(change):
                 result = self.assertError(header + change + "\n", "NEO1005")
                 self.assertIn("(part of val 'CONFIG')", result.errors[0].message)
+
+    def test_any_key_into_an_all_frozen_literal_is_an_error(self):
+        for source in [
+            "val ROUTES = {'get': ['/a'], 'post': ['/b']}\nkey = 'get'\nROUTES[key].append('/c')\n",
+            "val GRID = [[0, 0], [0, 0]]\nfor i in range(2):\n    GRID[i][i] = 1\n",
+        ]:
+            with self.subTest(source):
+                self.assertError(source, "NEO1005")
+
+    def test_any_key_into_a_literal_with_an_ordinary_item_is_fine(self):
+        self.assertClean("val MIXED = {'db': {'h': 1}, 'n': 3}\nkey = 'db'\nMIXED[key]['h'] = 2\n")
 
     def test_an_ordinary_object_inside_a_frozen_val_can_change(self):
         self.assertClean(

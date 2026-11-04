@@ -9,6 +9,7 @@ import sys
 import tokenize
 import unicodedata
 from pathlib import Path
+from typing import Any, TextIO
 
 import neo
 from neo.compiler import CompileResult, compile_source
@@ -30,10 +31,15 @@ SNAKE = "~~~~:>"  # starts the line for each file that compiled
 class _Version(argparse.Action):
     """The logo on a terminal; a plain ``neoc X.Y.Z`` line for scripts."""
 
-    def __init__(self, option_strings, dest=argparse.SUPPRESS, default=argparse.SUPPRESS, help=None):
+    def __init__(
+        self, option_strings: list[str], dest: str = argparse.SUPPRESS, default: Any = argparse.SUPPRESS,
+        help: str | None = None,
+    ) -> None:
         super().__init__(option_strings, dest=dest, default=default, nargs=0, help=help)
 
-    def __call__(self, parser, namespace, values, option_string=None):
+    def __call__(
+        self, parser: argparse.ArgumentParser, namespace: argparse.Namespace, values: Any, option_string: str | None = None
+    ) -> None:
         if sys.stdout.isatty():
             print(LOGO.format(version=neo.__version__))
         else:
@@ -104,7 +110,7 @@ def _caret(text: str, col: int) -> str:
     return "".join(pad) + "^"
 
 
-def _report(result: CompileResult, path: Path, source: str, explain: bool, out) -> None:
+def _report(result: CompileResult, path: Path, source: str, explain: bool, out: TextIO) -> None:
     lines = source.splitlines()
     for diagnostic in result.diagnostics:
         print(diagnostic.format(str(path)), file=sys.stderr)
@@ -152,11 +158,12 @@ def main(argv: list[str] | None = None) -> int:
         result = compile_source(source, str(path), rewrite_defaults=args.rewrite_defaults)
         to_stdout = args.output == "-"
         _report(result, path, source, args.explain, sys.stderr if to_stdout else sys.stdout)
-        if not result.ok:
+        code = result.code
+        if code is None:
             failed = True
             continue
         if to_stdout:
-            sys.stdout.write(result.code)
+            sys.stdout.write(code)
             sys.stdout.flush()
             written = "(stdout)"
         else:
@@ -167,7 +174,7 @@ def main(argv: list[str] | None = None) -> int:
                 failed = True
                 continue
             try:
-                _write(target, result.code, encoding)
+                _write(target, code, encoding)
             except OSError as exc:
                 print(f"neoc: error: cannot write {target}: {exc.strerror}", file=sys.stderr)
                 failed = True

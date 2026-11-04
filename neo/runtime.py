@@ -9,6 +9,8 @@ defined, so the checks cost nothing afterwards.
 from __future__ import annotations
 
 import asyncio
+import collections
+import collections.abc
 import functools
 import importlib
 import inspect
@@ -139,79 +141,210 @@ def _type_hints(fn: Callable[..., Any]) -> dict[str, Any]:
     return {name: hint for name, hint in raw.items() if not isinstance(hint, (str, typing.ForwardRef))}
 
 
+# ``deep=True`` also looks inside containers.  These are the ones whose items can
+# be read without consuming anything (an iterator or generator could not be).
+_INDEXED = (list, collections.abc.Sequence, collections.abc.MutableSequence, collections.deque)
+_UNORDERED = (set, frozenset, collections.abc.Set, collections.abc.MutableSet)
+_MAPPINGS = (
+    dict, collections.abc.Mapping, collections.abc.MutableMapping,
+    collections.OrderedDict, collections.defaultdict,
+)
+
+ItemCheck = Callable[[Any], "str | None"]  # where a value breaks its hint, or None
+
+
+def _names(expected: tuple[type, ...]) -> str:
+    return " | ".join("None" if t is type(None) else t.__qualname__ for t in expected)
+
+
+def _value_check(hint: Any) -> ItemCheck | None:
+    """The type of ``value`` and, below it, its items; None when nothing to check."""
+    expected = _runtime_types(hint)
+    if expected is None:
+        return None
+    items = _item_check(hint)
+
+    def check(value: Any) -> str | None:
+        if not isinstance(value, expected):
+            return f" must be {_names(expected)}, not {type(value).__qualname__}"
+        return items(value) if items is not None else None
+
+    return check
+
+
+def _item_check(hint: Any) -> ItemCheck | None:
+    """The items of a value that already has the right container type."""
+    origin, args = typing.get_origin(hint), typing.get_args(hint)
+    if origin is typing.Annotated:
+        return _item_check(args[0])
+    if origin is typing.Union or origin is types.UnionType:
+        members = [(_runtime_types(arg), _item_check(arg)) for arg in args]
+        if all(items is None for _, items in members):
+            return None
+
+        def check_union(value: Any) -> str | None:
+            problem = None
+            for expected, items in members:
+                if expected is not None and isinstance(value, expected):
+                    found = items(value) if items is not None else None
+                    if found is None:
+                        return None
+                    problem = problem or found
+            return problem
+
+        return check_union
+    if not args:
+        return None
+    if origin is tuple:
+        if len(args) == 2 and args[1] is Ellipsis:
+            each = _value_check(args[0])
+            return None if each is None else _indexed(each)
+        fixed = [_value_check(arg) for arg in args]
+
+        def check_tuple(value: Any) -> str | None:
+            if len(value) != len(fixed):
+                return f" must have {len(fixed)} items, not {len(value)}"
+            for i, (item_check, item) in enumerate(zip(fixed, value)):
+                if item_check is not None and (problem := item_check(item)):
+                    return f"[{i}]{problem}"
+            return None
+
+        return check_tuple
+    if origin in _MAPPINGS and len(args) == 2:
+        key_check, value_check = _value_check(args[0]), _value_check(args[1])
+        if key_check is None and value_check is None:
+            return None
+
+        def check_mapping(value: Any) -> str | None:
+            for key, item in value.items():
+                if key_check is not None and (problem := key_check(key)):
+                    return f" key {key!r}{problem}"
+                if value_check is not None and (problem := value_check(item)):
+                    return f"[{key!r}]{problem}"
+            return None
+
+        return check_mapping
+    if len(args) == 1 and (origin in _INDEXED or origin in _UNORDERED):
+        each = _value_check(args[0])
+        if each is None:
+            return None
+        if origin in _INDEXED:
+            return _indexed(each)
+
+        def check_unordered(value: Any) -> str | None:
+            for item in value:
+                if problem := each(item):
+                    return f" item {item!r}{problem}"
+            return None
+
+        return check_unordered
+    return None
+
+
+def _indexed(each: ItemCheck) -> ItemCheck:
+    def check(value: Any) -> str | None:
+        for i, item in enumerate(value):
+            if problem := each(item):
+                return f"[{i}]{problem}"
+        return None
+
+    return check
+
+
+@dataclass(frozen=True)
+class _Expect:
+    types: tuple[type, ...]  # the isinstance check every mode makes
+    items: ItemCheck | None  # deep=True: the items below it
+
+
 @dataclass(frozen=True)
 class _Plan:
-    positional: tuple[tuple[int, str, bool, tuple[type, ...]], ...]  # index, name, positional-only, types
-    keyword: tuple[tuple[str, tuple[type, ...]], ...]
-    varargs: tuple[int, tuple[type, ...]] | None  # first extra index, types
-    varkw: tuple[frozenset[str], tuple[type, ...]] | None  # named parameters, types
+    positional: tuple[tuple[int, str, bool, _Expect], ...]  # index, name, positional-only, expectation
+    keyword: tuple[tuple[str, _Expect], ...]
+    varargs: tuple[int, _Expect] | None  # first extra index
+    varkw: tuple[frozenset[str], _Expect] | None  # named parameters
+    returns: _Expect | None  # returns=True
 
 
-def _plan(fn: Callable[..., Any]) -> _Plan:
+def _plan(fn: Callable[..., Any], deep: bool, returns: bool) -> _Plan:
     code = fn.__code__
     hints = _type_hints(fn)
     names = code.co_varnames
     npos, nkw = code.co_argcount, code.co_kwonlyargcount
 
-    def types_for(name: str) -> tuple[type, ...] | None:
-        return _runtime_types(hints[name]) if name in hints else None
+    def expect(name: str) -> _Expect | None:
+        if name not in hints or (expected := _runtime_types(hints[name])) is None:
+            return None
+        return _Expect(expected, _item_check(hints[name]) if deep else None)
 
     positional = []
     for index in range(npos):
-        if (expected := types_for(names[index])) is not None:
-            positional.append((index, names[index], index < code.co_posonlyargcount, expected))
+        if (found := expect(names[index])) is not None:
+            positional.append((index, names[index], index < code.co_posonlyargcount, found))
     keyword = []
     for name in names[npos : npos + nkw]:
-        if (expected := types_for(name)) is not None:
-            keyword.append((name, expected))
+        if (found := expect(name)) is not None:
+            keyword.append((name, found))
     index = npos + nkw
     varargs = varkw = None
     if code.co_flags & inspect.CO_VARARGS:
-        if (expected := types_for(names[index])) is not None:
-            varargs = (npos, expected)
+        if (found := expect(names[index])) is not None:
+            varargs = (npos, found)
         index += 1
     if code.co_flags & inspect.CO_VARKEYWORDS:
-        if (expected := types_for(names[index])) is not None:
-            varkw = (frozenset(names[code.co_posonlyargcount : npos + nkw]), expected)
-    return _Plan(tuple(positional), tuple(keyword), varargs, varkw)
+        if (found := expect(names[index])) is not None:
+            varkw = (frozenset(names[code.co_posonlyargcount : npos + nkw]), found)
+    return _Plan(tuple(positional), tuple(keyword), varargs, varkw, expect("return") if returns else None)
 
 
-def _fail(fn: Callable[..., Any], name: str, value: Any, expected: tuple[type, ...]) -> CheckError:
-    wanted = " | ".join("None" if t is type(None) else t.__qualname__ for t in expected)
-    return CheckError(f"{fn.__qualname__}() argument '{name}' must be {wanted}, not {type(value).__qualname__}")
+def _verify(fn: Callable[..., Any], what: str, value: Any, expect: _Expect) -> None:
+    if not isinstance(value, expect.types):
+        raise CheckError(f"{fn.__qualname__}() {what} must be {_names(expect.types)}, not {type(value).__qualname__}")
+    if expect.items is not None and (problem := expect.items(value)):
+        raise CheckError(f"{fn.__qualname__}() {what}{problem}")
 
 
 def _check(fn: Callable[..., Any], plan: _Plan, args: tuple[Any, ...], kwargs: dict[str, Any]) -> None:
-    for index, name, positional_only, expected in plan.positional:
+    for index, name, positional_only, expect in plan.positional:
         if index < len(args):
             value = args[index]
         elif not positional_only and name in kwargs:
             value = kwargs[name]
         else:
             continue  # the default is used
-        if not isinstance(value, expected):
-            raise _fail(fn, name, value, expected)
-    for name, expected in plan.keyword:
-        if name in kwargs and not isinstance(kwargs[name], expected):
-            raise _fail(fn, name, kwargs[name], expected)
+        _verify(fn, f"argument '{name}'", value, expect)
+    for name, expect in plan.keyword:
+        if name in kwargs:
+            _verify(fn, f"argument '{name}'", kwargs[name], expect)
     if plan.varargs is not None:
-        start, expected = plan.varargs
+        start, expect = plan.varargs
         for offset, value in enumerate(args[start:]):
-            if not isinstance(value, expected):
-                raise _fail(fn, f"*args[{offset}]", value, expected)
+            _verify(fn, f"argument '*args[{offset}]'", value, expect)
     if plan.varkw is not None:
-        named, expected = plan.varkw
+        named, expect = plan.varkw
         for name, value in kwargs.items():
-            if name not in named and not isinstance(value, expected):
-                raise _fail(fn, name, value, expected)
+            if name not in named:
+                _verify(fn, f"argument '{name}'", value, expect)
 
 
-def checked(fn: F) -> F:
+@overload
+def checked(fn: F, /) -> F: ...
+@overload
+def checked(*, deep: bool = False, returns: bool = False) -> Callable[[F], F]: ...
+def checked(fn: F | None = None, /, *, deep: bool = False, returns: bool = False) -> F | Callable[[F], F]:
     """Check annotated arguments with ``isinstance`` on every call.
 
-    Only functions carrying this decorator are checked, and only one level
-    deep.  With ``NEO_CHECKS=0`` the function is returned unchanged.
+    Only functions carrying this decorator are checked.  By default the check
+    is one level deep and covers the arguments only; ``deep=True`` also checks
+    the items of lists, tuples, sets and dicts, and ``returns=True`` checks the
+    return value too.  With ``NEO_CHECKS=0`` the function is returned unchanged.
     """
+    if fn is None:
+        return lambda f: _checked(f, deep, returns)
+    return _checked(fn, deep, returns)
+
+
+def _checked(fn: F, deep: bool, returns: bool) -> F:
     if not checks_enabled():
         return fn
     target = inspect.unwrap(fn)
@@ -219,24 +352,35 @@ def checked(fn: F) -> F:
         raise TypeError(f"@neo.checked expects a function, got {fn!r}")
     plan: _Plan | None = None
 
-    def check(args: tuple[Any, ...], kwargs: dict[str, Any]) -> None:
+    def ready() -> _Plan:
         nonlocal plan
         if plan is None:  # resolved on first call, so forward references work
-            plan = _plan(target)
-        _check(target, plan, args, kwargs)
+            plan = _plan(target, deep, returns)
+        return plan
+
+    def result(value: Any) -> Any:
+        expect = ready().returns
+        if expect is not None:
+            _verify(target, "return value", value, expect)
+        return value
+
+    async def awaited(coroutine: Awaitable[Any]) -> Any:
+        return result(await coroutine)
 
     if inspect.iscoroutinefunction(fn) and sys.version_info < (3, 12):  # no markcoroutinefunction
         @functools.wraps(fn)
         async def async_wrapper(*args: Any, **kwargs: Any) -> Any:
-            check(args, kwargs)
-            return await fn(*args, **kwargs)
+            _check(target, ready(), args, kwargs)
+            return result(await fn(*args, **kwargs))
 
         return typing.cast(F, async_wrapper)
 
     @functools.wraps(fn)
     def wrapper(*args: Any, **kwargs: Any) -> Any:
-        check(args, kwargs)
-        return fn(*args, **kwargs)
+        _check(target, ready(), args, kwargs)
+        if inspect.iscoroutinefunction(fn):
+            return awaited(fn(*args, **kwargs)) if returns else fn(*args, **kwargs)
+        return result(fn(*args, **kwargs))
 
     if inspect.iscoroutinefunction(fn):
         inspect.markcoroutinefunction(wrapper)

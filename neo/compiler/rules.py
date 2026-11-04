@@ -22,7 +22,8 @@ from __future__ import annotations
 
 import ast
 from dataclasses import dataclass, field
-from typing import NamedTuple
+from collections.abc import Iterable, Iterator
+from typing import NamedTuple, Protocol
 
 from neo.compiler.tokens import Prepared
 
@@ -92,10 +93,23 @@ class Diagnostic:
 # --- scopes and name resolution --------------------------------------------
 
 
+class Located(Protocol):
+    """Any node with a source position: an expression, statement, argument, pattern..."""
+
+    @property
+    def lineno(self) -> int: ...
+    @property
+    def col_offset(self) -> int: ...
+    @property
+    def end_lineno(self) -> int | None: ...
+    @property
+    def end_col_offset(self) -> int | None: ...
+
+
 @dataclass(eq=False)
 class Binding:
     name: str
-    node: ast.AST  # where the name is bound; used for positions
+    node: Located  # where the name is bound; used for positions
     kind: str  # assign, del, param, def, class, import, except, match, walrus, type_param
     target: str | None = None  # the dotted name an import binds
 
@@ -198,11 +212,11 @@ class _ScopeBuilder(ast.NodeVisitor):
         self.names = names
         self.current = names.module
 
-    def visit_all(self, nodes) -> None:
+    def visit_all(self, nodes: Iterable[ast.AST]) -> None:
         for node in nodes:
             self.visit(node)
 
-    def _bind(self, name: str, node: ast.AST, kind: str, scope: Scope | None = None, target: str | None = None) -> None:
+    def _bind(self, name: str, node: Located, kind: str, scope: Scope | None = None, target: str | None = None) -> None:
         (scope or self.current).bind(Binding(name, node, kind, target))
 
     def _enter(self, node: ast.AST, kind: str) -> Scope:
@@ -254,7 +268,7 @@ class _ScopeBuilder(ast.NodeVisitor):
         self.visit_all(node.body)
         self.current = outer
 
-    def _comprehension(self, node, *results: ast.expr) -> None:
+    def _comprehension(self, node: ast.ListComp | ast.SetComp | ast.GeneratorExp | ast.DictComp, *results: ast.expr) -> None:
         self.visit(node.generators[0].iter)
         outer = self._enter(node, "comprehension")
         for i, generator in enumerate(node.generators):
@@ -265,7 +279,7 @@ class _ScopeBuilder(ast.NodeVisitor):
         self.visit_all(results)
         self.current = outer
 
-    def visit_ListComp(self, node) -> None:
+    def visit_ListComp(self, node: ast.ListComp | ast.SetComp | ast.GeneratorExp) -> None:
         self._comprehension(node, node.elt)
 
     visit_SetComp = visit_GeneratorExp = visit_ListComp
@@ -276,7 +290,7 @@ class _ScopeBuilder(ast.NodeVisitor):
     def visit_NamedExpr(self, node: ast.NamedExpr) -> None:
         self.visit(node.value)
         scope = self.current
-        while scope.kind == "comprehension":
+        while scope.kind == "comprehension" and scope.parent is not None:
             scope = scope.parent
         self._bind(node.target.id, node.target, "walrus", scope=scope)
 
@@ -318,7 +332,7 @@ class _ScopeBuilder(ast.NodeVisitor):
             self._bind(node.name, node, "except")
         self.generic_visit(node)
 
-    def visit_MatchAs(self, node) -> None:
+    def visit_MatchAs(self, node: ast.MatchAs | ast.MatchStar) -> None:
         if node.name:
             self._bind(node.name, node, "match")
         self.generic_visit(node)
@@ -384,7 +398,7 @@ class _Picklability:
     def __init__(self, names: Names) -> None:
         self.names = names
 
-    def classify(self, node: ast.expr | None, scope: Scope, seen: frozenset = frozenset()) -> str:
+    def classify(self, node: ast.expr | None, scope: Scope, seen: frozenset[ast.AST] = frozenset()) -> str:
         if node is None:
             return UNKNOWN
         if isinstance(node, ast.Constant):
@@ -424,7 +438,7 @@ class _Picklability:
                 return self._module_class(node, scope, seen)
         return UNKNOWN
 
-    def _module_class(self, node: ast.Name, scope: Scope, seen: frozenset) -> str:
+    def _module_class(self, node: ast.Name, scope: Scope, seen: frozenset[ast.AST]) -> str:
         # Dataclasses, NamedTuples, TypedDicts and enums defined at module level.
         names = self.names
         where = names.load_scope.get(node, scope)
@@ -434,6 +448,8 @@ class _Picklability:
         if len(bindings) != 1 or bindings[0].kind != "class":
             return UNKNOWN
         cls = bindings[0].node
+        if not isinstance(cls, ast.ClassDef):
+            return UNKNOWN
         if cls in seen:
             return PICKLABLE
         bases = {names.qualified_name(base, names.module) for base in cls.bases}
@@ -521,28 +537,36 @@ def _declared_names(target: ast.expr) -> list[ast.Name] | None:
     return None
 
 
-def _literal_item(container: ast.expr, key: ast.expr) -> ast.expr | None:
-    """``container[key]`` when both are literal enough to tell, else None."""
-    if not isinstance(key, ast.Constant):
+def _literal_items(container: ast.expr, key: ast.expr) -> list[ast.expr] | None:
+    """The items ``container[key]`` can be, when the literal tells; else None.
+
+    A constant key gives the one matching item; any other key (but a slice)
+    gives every item.
+    """
+    if isinstance(key, ast.Slice):
         return None
     if isinstance(container, ast.Dict):
         if any(k is None for k in container.keys):  # ``**other`` hides the keys
             return None
+        if not isinstance(key, ast.Constant):
+            return list(container.values)
         for k, v in zip(container.keys, container.values):
             if isinstance(k, ast.Constant) and type(k.value) is type(key.value) and k.value == key.value:
-                return v
+                return [v]
         return None
-    if isinstance(container, (ast.List, ast.Tuple)) and type(key.value) is int:
+    if isinstance(container, (ast.List, ast.Tuple)):
         if any(isinstance(e, ast.Starred) for e in container.elts):
             return None
-        if -len(container.elts) <= key.value < len(container.elts):
-            return container.elts[key.value]
+        if not isinstance(key, ast.Constant):
+            return list(container.elts)
+        if type(key.value) is int and -len(container.elts) <= key.value < len(container.elts):
+            return [container.elts[key.value]]
     return None
 
 
-def _local_nodes(body: list[ast.stmt]):
+def _local_nodes(body: list[ast.stmt]) -> Iterator[ast.AST]:
     """Walk a function body without descending into nested functions or classes."""
-    stack = list(body)
+    stack: list[ast.AST] = list(body)
     while stack:
         node = stack.pop()
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda, ast.ClassDef)):
@@ -558,11 +582,14 @@ class _Analyzer:
         self.rewrite_defaults = rewrite_defaults
         self.names = Names(tree)
         self.result = Analysis(self.names)
-        self.parents = {child: parent for parent in ast.walk(tree) for child in ast.iter_child_nodes(parent)}
-        self.val_targets: set[ast.Name] = set()
-        self.frozen_vals: dict[ast.Name, ast.expr] = {}  # val name -> the literal neoc froze
+        # Keyed by object so a Located binding node can be looked up too.
+        self.parents: dict[object, ast.AST] = {
+            child: parent for parent in ast.walk(tree) for child in ast.iter_child_nodes(parent)
+        }
+        self.val_targets: set[Located] = set()
+        self.frozen_vals: dict[Located, ast.expr] = {}  # val name -> the literal neoc froze
         self.val_params: list[tuple[ast.arg, ast.FunctionDef | ast.AsyncFunctionDef]] = []
-        self.task_nodes: set[ast.AST] = set()
+        self.task_nodes: set[object] = set()
         self.compute_nodes: list[ast.FunctionDef] = []
 
     def run(self) -> Analysis:
@@ -577,7 +604,7 @@ class _Analyzer:
         self.result.diagnostics.sort(key=lambda d: (d.line, d.col, d.code))
         return self.result
 
-    def _report(self, code: str, severity: str, where: ast.AST | tuple[int, int], message: str) -> None:
+    def _report(self, code: str, severity: str, where: Located | tuple[int, int], message: str) -> None:
         line, col = where if isinstance(where, tuple) else (where.lineno, where.col_offset)
         line, col = self.prepared.original_position(line, col)
         self.result.diagnostics.append(Diagnostic(code, severity, message, line, col))
@@ -625,7 +652,8 @@ class _Analyzer:
         if kind == "val":
             self.result.val_decls.append(node)
             self.val_targets.update(names)
-            self._note_frozen(target, node.value)
+            if node.value is not None:
+                self._note_frozen(target, node.value)
 
     def _note_frozen(self, target: ast.expr, value: ast.expr) -> None:
         if isinstance(target, ast.Tuple):
@@ -653,15 +681,37 @@ class _Analyzer:
                 declared = [b for b in bindings if b.node in self.val_targets]
                 if not declared:
                     continue
+                ordered = sorted(bindings, key=lambda b: (b.node.lineno, b.node.col_offset))
                 first = min(declared, key=lambda b: (b.node.lineno, b.node.col_offset))
-                for binding in bindings:
+                for binding in ordered:
                     if binding is first:
                         continue
                     if binding.kind == "param":
                         self._report("NEO1001", ERROR, first.node, f"cannot declare val '{name}': it is already a parameter")
-                    else:
-                        self._report("NEO1001", ERROR, binding.node,
-                                     f"cannot rebind '{name}': it is declared val at line {first.node.lineno}")
+                        continue
+                    # One val per branch of an if/elif/else or a match is still one binding per run.
+                    earlier = [b for b in declared if (b.node.lineno, b.node.col_offset) < (binding.node.lineno, binding.node.col_offset)]
+                    if binding in declared and all(self._exclusive(binding.node, b.node) for b in earlier):
+                        continue
+                    self._report("NEO1001", ERROR, binding.node,
+                                 f"cannot rebind '{name}': it is declared val at line {first.node.lineno}")
+
+    def _exclusive(self, a: Located, b: Located) -> bool:
+        """Whether ``a`` and ``b`` sit in different branches of the same if or match."""
+        def branches(node: Located) -> dict[ast.AST, object]:
+            found: dict[ast.AST, object] = {}
+            child: object = node
+            parent = self.parents.get(node)
+            while parent is not None:
+                if isinstance(parent, ast.If) and child is not parent.test:
+                    found[parent] = "body" if child in parent.body else "orelse"
+                elif isinstance(parent, ast.match_case):
+                    found[self.parents[parent]] = parent
+                child, parent = parent, self.parents.get(parent)
+            return found
+
+        mine, theirs = branches(a), branches(b)
+        return any(mine[node] != theirs[node] for node in mine.keys() & theirs.keys())
 
     # NEO1005 ---------------------------------------------------------------------
 
@@ -669,43 +719,45 @@ class _Analyzer:
         # A val bound to any other object only promises not to be rebound, so
         # only the values neoc froze itself are checked: changing those always
         # fails at run time, and catching it here has no false positives.
-        owners = {
-            binding.node: scope
-            for scope in self.names.scopes
-            for bindings in scope.bindings.values()
-            for binding in bindings
-            if binding.node in self.frozen_vals
-        }
-        for target, value in self.frozen_vals.items():
-            owner = owners.get(target)
-            for use in self.names.loads.get(target.id, []):
-                if owner is None or self.names.owner(target.id, self.names.load_scope[use]) is not owner:
+        for owner in self.names.scopes:
+            for name, bindings in owner.bindings.items():
+                # With one val per branch, every branch has to hold a frozen value.
+                if not bindings or not all(b.node in self.frozen_vals for b in bindings):
                     continue
-                node, part = self._frozen_part(use, value)
-                how = self._mutation(node)
-                if not how:
-                    continue
-                kind = self._frozen_kind(part)
-                where = f"val '{target.id}'" if node is use else f"'{ast.unparse(node)}' (part of val '{target.id}')"
-                self._report("NEO1005", ERROR, use,
-                             f"{where} was frozen to a {kind}, which cannot be changed by {how}; "
-                             f"declare '{target.id}' with var if it has to change")
+                values = [self.frozen_vals[b.node] for b in bindings]
+                for use in self.names.loads.get(name, []):
+                    if self.names.owner(name, self.names.load_scope[use]) is not owner:
+                        continue
+                    node, parts = self._frozen_part(use, values)
+                    how = self._mutation(node)
+                    if not how:
+                        continue
+                    kind = " or ".join(sorted({self._frozen_kind(part) or "" for part in parts}))
+                    where = f"val '{name}'" if node is use else f"'{ast.unparse(node)}' (part of val '{name}')"
+                    self._report("NEO1005", ERROR, use,
+                                 f"{where} was frozen to a {kind}, which cannot be changed by {how}; "
+                                 f"declare '{name}' with var if it has to change")
 
-    def _frozen_part(self, use: ast.Name, value: ast.expr) -> tuple[ast.expr, ast.expr]:
-        """Follow ``X["db"][0]`` through the literal as far as it is frozen too.
+    def _frozen_part(self, use: ast.Name, values: list[ast.expr]) -> tuple[ast.expr, list[ast.expr]]:
+        """Follow ``X["db"][key]`` through the literal as far as it is frozen too.
 
-        Only constant keys found in the literal itself are followed, so an item
-        that is an ordinary (mutable) object is never mistaken for a frozen one.
+        A constant key picks one item; any other key could pick any item, so it
+        is followed only when every item is frozen.  An item that is an
+        ordinary (mutable) object is never mistaken for a frozen one.
         """
         node: ast.expr = use
+        parts = values
         while True:
             parent = self.parents.get(node)
             if not (isinstance(parent, ast.Subscript) and parent.value is node and isinstance(parent.ctx, ast.Load)):
-                return node, value
-            item = _literal_item(value, parent.slice)
-            if item is None or not self._frozen_kind(item):
-                return node, value
-            node, value = parent, item
+                return node, parts
+            items: list[ast.expr] = []
+            for part in parts:
+                found = _literal_items(part, parent.slice)
+                if not found or not all(self._frozen_kind(item) for item in found):
+                    return node, parts
+                items += found
+            node, parts = parent, items
 
     # NEO1002 ---------------------------------------------------------------------
 
@@ -728,7 +780,7 @@ class _Analyzer:
                 if how:
                     self._report("NEO1002", ERROR, use, f"val parameter '{arg.arg}' is mutated by {how}")
 
-    def _mutation(self, use: ast.Name) -> str | None:
+    def _mutation(self, use: ast.expr) -> str | None:
         parent = self.parents.get(use)
         if isinstance(parent, ast.Attribute) and parent.attr in MUTATING_METHODS:
             call = self.parents.get(parent)
@@ -751,7 +803,7 @@ class _Analyzer:
             for arg, default in defaults(func.args):
                 if not self._is_mutable_default(default):
                     continue
-                if cache_lines.intersection(range(arg.lineno, default.end_lineno + 1)):
+                if cache_lines.intersection(range(arg.lineno, (default.end_lineno or arg.lineno) + 1)):
                     continue  # ``# neo: cache``: the sharing is intended
                 blocker = self._unmovable_name(default, func)
                 if self.rewrite_defaults and not isinstance(func, ast.Lambda) and blocker is None:
@@ -821,14 +873,14 @@ class _Analyzer:
             check_args = []
             for arg in all_args(func.args):
                 verdict = picklability.classify(arg.annotation, scope)
-                if verdict == UNPICKLABLE:
+                if verdict == UNPICKLABLE and arg.annotation is not None:
                     self._report("NEO2004", ERROR, arg.annotation,
                                  f"argument '{arg.arg}' of compute '{func.name}' is '{ast.unparse(arg.annotation)}', "
                                  "which cannot be pickled into a worker process")
                 elif verdict == UNKNOWN:
                     check_args.append(arg.arg)
             verdict = picklability.classify(func.returns, scope)
-            if verdict == UNPICKLABLE:
+            if verdict == UNPICKLABLE and func.returns is not None:
                 self._report("NEO2004", ERROR, func.returns,
                              f"compute '{func.name}' returns '{ast.unparse(func.returns)}', "
                              "which cannot be pickled back from a worker process")
@@ -841,8 +893,8 @@ class _Analyzer:
             self._check_isolated(node)
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)):
             ctx = _Context(
-                task=node if node in self.task_nodes else ctx.task,
-                compute=node if node in self.compute_nodes else ctx.compute,
+                task=node if isinstance(node, ast.AsyncFunctionDef) and node in self.task_nodes else ctx.task,
+                compute=node if isinstance(node, ast.FunctionDef) and node in self.compute_nodes else ctx.compute,
                 in_scope=False,
             )
         elif isinstance(node, ast.AsyncWith) and any(self._is_neo_scope(i.context_expr) for i in node.items):
@@ -870,11 +922,12 @@ class _Analyzer:
         func = call.func
         if ctx.compute is not None and isinstance(func, ast.Name) and self._is_task(func):
             self._report("NEO2001", ERROR, call,
-                         f"compute '{ctx.compute.name}' calls task '{func.id}'; a worker process has no event loop "
-                         "to run it (call compute from task instead)")
+                         f"compute '{ctx.compute.name}' calls task {self._shown(func)}; a worker process has no "
+                         "event loop to run it (call compute from task instead)")
         qualified = self.names.qualified_name(func)
-        if qualified == "threading.Thread" and (ctx.task or ctx.compute):
-            kind, owner = ("task", ctx.task) if ctx.task else ("compute", ctx.compute)
+        owner = ctx.task if ctx.task is not None else ctx.compute
+        if qualified == "threading.Thread" and owner is not None:
+            kind = "task" if ctx.task is not None else "compute"
             self._report("NEO2002", WARNING, call,
                          f"threading.Thread created inside {kind} '{owner.name}'; "
                          "use task for I/O and compute for CPU work instead of a raw thread")
@@ -885,20 +938,27 @@ class _Analyzer:
         self._check_coroutine_use(call, ctx)
 
     def _is_task(self, name: ast.Name) -> bool:
-        return self._coroutine_kind(name) == "task"
+        found = self._coroutine_def(name)
+        return found is not None and found[0] == "task"
 
-    def _coroutine_kind(self, func: ast.expr) -> str | None:
-        """'task' or 'compute' when ``func`` names one defined in this module."""
-        if not isinstance(func, ast.Name) or func not in self.names.load_scope:
+    def _coroutine_def(self, func: ast.expr, hops: int = 0) -> tuple[str, str] | None:
+        """``("task" | "compute", name)`` when ``func`` names one defined in this
+        module, directly or through a plain alias such as ``f = work``."""
+        if not isinstance(func, ast.Name) or func not in self.names.load_scope or hops > 10:
             return None
         owner = self.names.owner(func.id, self.names.load_scope[func])
         if owner is None:
             return None
-        for binding in owner.bindings[func.id]:
+        bindings = owner.bindings[func.id]
+        for binding in bindings:
             if binding.kind == "def" and binding.node in self.task_nodes:
-                return "task"
+                return "task", func.id
             if binding.kind == "def" and binding.node in self.compute_nodes:
-                return "compute"
+                return "compute", func.id
+        if len(bindings) == 1 and bindings[0].kind == "assign":
+            statement = self.parents.get(bindings[0].node)
+            if isinstance(statement, (ast.Assign, ast.AnnAssign)) and isinstance(statement.value, ast.Name):
+                return self._coroutine_def(statement.value, hops + 1)
         return None
 
     # NEO2006: calling a task or compute returns a coroutine, which only runs
@@ -916,18 +976,27 @@ class _Analyzer:
     })
     _RUNNER_METHODS = frozenset({"spawn", "create_task", "run_until_complete"})  # scope, TaskGroup, event loop
 
+    def _shown(self, func: ast.Name) -> str:
+        """``'work'``, or ``'work' (called as 'f')`` for an alias."""
+        found = self._coroutine_def(func)
+        if found is None or found[1] == func.id:
+            return f"'{func.id}'"
+        return f"'{found[1]}' (called as '{func.id}')"
+
     def _check_coroutine_use(self, call: ast.Call, ctx: _Context) -> None:
-        kind = self._coroutine_kind(call.func)
-        if kind is None:
+        found = self._coroutine_def(call.func)
+        if found is None or not isinstance(call.func, ast.Name):
             return
-        name = call.func.id
+        kind = found[0]
+        name = self._shown(call.func)
         if ctx.compute is not None:
             if kind == "compute":  # compute calling task is already NEO2001
                 self._report("NEO2006", WARNING, call,
-                             f"compute '{ctx.compute.name}' calls compute '{name}', which returns a coroutine "
+                             f"compute '{ctx.compute.name}' calls compute {name}, which returns a coroutine "
                              "that a worker process cannot await; call a plain function instead")
             return
-        node, parent = call, self.parents.get(call)
+        node: ast.AST = call
+        parent = self.parents.get(call)
         while isinstance(parent, self._CARRIED) or (isinstance(parent, ast.IfExp) and node is not parent.test):
             node, parent = parent, self.parents.get(parent)
         if isinstance(parent, self._KEPT):
@@ -941,7 +1010,7 @@ class _Analyzer:
         else:
             problem = "the coroutine is used as a value instead of being awaited"
         self._report("NEO2006", WARNING, call,
-                     f"{kind} '{name}' returns a coroutine; {problem} (await it, or pass it to s.spawn or asyncio.run)")
+                     f"{kind} {name} returns a coroutine; {problem} (await it, or pass it to s.spawn or asyncio.run)")
 
     def _runs_coroutines(self, func: ast.expr) -> bool:
         if self.names.qualified_name(func) in self._RUNNERS:

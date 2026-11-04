@@ -22,6 +22,7 @@ import keyword
 import re
 import tokenize
 from dataclasses import dataclass, field
+from typing import TypeGuard
 
 # A colon at bracket depth 0 on a line that starts with one of these ends a
 # block header, so a statement may follow on the same line (``if x: val y = 1``).
@@ -118,11 +119,11 @@ class Prepared:
         return ""
 
 
-def _is_name(tok: tokenize.TokenInfo | None) -> bool:
+def _is_name(tok: tokenize.TokenInfo | None) -> TypeGuard[tokenize.TokenInfo]:
     return tok is not None and tok.type == tokenize.NAME and not keyword.iskeyword(tok.string)
 
 
-def _starts_type(tok: tokenize.TokenInfo | None) -> bool:
+def _starts_type(tok: tokenize.TokenInfo | None) -> TypeGuard[tokenize.TokenInfo]:
     # ``x: val list[int]`` or ``x: val "Forward"``; ``x: val`` alone is a plain annotation.
     return _is_name(tok) or (tok is not None and tok.type == tokenize.STRING)
 

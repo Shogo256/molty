@@ -87,11 +87,19 @@ class CoroutineUse(NeoTestCase):
             "compute def twice(t: str) -> str:\n    return digest(t) * 2\n": "calls compute 'digest'",
             "def show(t: str):\n    print(digest(t))\n": "passed to 'print', which does not run it",
             "def count(t: str) -> int:\n    return len([digest(t)])\n": "passed to 'len', which does not run it",
+            "f = digest\ng = f\ndef show(t: str):\n    print(g(t))\n": "compute 'digest' (called as 'g')",
         }
         for body, message in cases.items():
             with self.subTest(body):
                 result = self.assertWarning(self.HEADER + body, "NEO2006")
                 self.assertIn(message, result.warnings[0].message)
+
+    def test_a_task_called_through_an_alias_from_compute_is_an_error(self):
+        result = self.assertError(self.HEADER + "get = fetch\ncompute def c() -> str:\n    return get('u')\n", "NEO2001")
+        self.assertIn("task 'fetch' (called as 'get')", result.errors[0].message)
+
+    def test_an_awaited_alias_is_quiet(self):
+        self.assertClean(self.HEADER + "f = digest\ntask def main() -> str:\n    return await f('x')\n")
 
     def test_a_coroutine_that_is_awaited_or_handed_on_is_quiet(self):
         self.assertClean(

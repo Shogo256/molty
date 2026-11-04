@@ -3,6 +3,7 @@
 import asyncio
 import inspect
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -93,6 +94,61 @@ class Checked(NeoTestCase):
 
     def test_functions_without_the_decorator_are_not_checked(self):
         self.assertEqual(self.mod.unchecked("abc"), 3)
+
+
+class DeepAndReturnChecks(NeoTestCase):
+    SOURCE = """
+        import neo
+
+        @neo.checked(deep=True)
+        def deep(xs: list[int], table: dict[str, list[float]], pair: tuple[int, str], tags: set[str] | None = None) -> int:
+            return len(xs)
+
+        @neo.checked
+        def shallow(xs: list[int]) -> int:
+            return len(xs)
+
+        @neo.checked(returns=True)
+        def lies(n: int) -> str:
+            return n
+
+        @neo.checked(deep=True, returns=True)
+        task def fetch(n: int) -> list[str]:
+            return [str(n), n]
+        """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.mod = load(cls.SOURCE)
+
+    def test_deep_checks_name_the_item_that_is_wrong(self):
+        cases = [
+            (([1, "2"], {}, (1, "a")), "argument 'xs'[1] must be int, not str"),
+            (([1], {"a": [1.0, "x"]}, (1, "a")), "argument 'table'['a'][1] must be float | int, not str"),
+            (([1], {1: []}, (1, "a")), "argument 'table' key 1 must be str, not int"),
+            (([1], {}, (1,)), "argument 'pair' must have 2 items, not 1"),
+            (([1], {}, (1, "a"), {"ok", 3}), "argument 'tags' item 3 must be str, not int"),
+        ]
+        for args, message in cases:
+            with self.subTest(message):
+                with self.assertRaisesRegex(CheckError, re.escape(message)):
+                    self.mod.deep(*args)
+        self.assertEqual(self.mod.deep([1, 2], {"a": [1, 2.5]}, (1, "a"), None), 2)
+
+    def test_without_deep_the_items_are_not_looked_at(self):
+        self.assertEqual(self.mod.shallow(["a"]), 1)
+
+    def test_returns_checks_the_return_value(self):
+        with self.assertRaisesRegex(CheckError, "lies\\(\\) return value must be str, not int"):
+            self.mod.lies(1)
+        with self.assertRaisesRegex(CheckError, re.escape("fetch() return value[1] must be str, not int")):
+            asyncio.run(self.mod.fetch(1))
+
+    def test_neo_checks_0_turns_these_off_too(self):
+        with mock.patch.dict(os.environ, {"NEO_CHECKS": "0"}):
+            mod = load(self.SOURCE)
+        self.assertEqual(mod.lies(1), 1)
+        self.assertEqual(mod.deep(["x"], {}, (1, "a")), 1)
 
 
 class FrozenValues(NeoTestCase):

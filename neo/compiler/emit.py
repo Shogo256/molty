@@ -12,7 +12,7 @@ import os
 import re
 from dataclasses import dataclass
 
-from neo.compiler.rules import Analysis, ComputeInfo, MutableDefault
+from neo.compiler.rules import Analysis, ComputeInfo, Located, MutableDefault
 from neo.compiler.tokens import Prepared, split_lines
 
 MAPPING_PROXY = "neo.runtime.MappingProxyType"
@@ -57,23 +57,24 @@ class _Text:
             utf8_col = len(text.encode("utf-8")[:utf8_col].decode("utf-8", errors="ignore"))
         return self.starts[line - 1] + utf8_col
 
-    def start(self, node: ast.AST) -> int:
+    def start(self, node: Located) -> int:
         return self.offset(node.lineno, node.col_offset)
 
-    def end(self, node: ast.AST) -> int:
+    def end(self, node: Located) -> int:
+        assert node.end_lineno is not None and node.end_col_offset is not None  # always set by ast.parse
         return self.offset(node.end_lineno, node.end_col_offset)
 
-    def segment(self, node: ast.AST) -> str:
+    def segment(self, node: Located) -> str:
         return self.source[self.start(node) : self.end(node)]
 
     def line_start(self, line: int) -> int:
         return self.starts[min(line, len(self.lines) + 1) - 1]
 
-    def before(self, node: ast.AST) -> str:
+    def before(self, node: Located) -> str:
         """The text between the start of the node's line and the node."""
         return self.source[self.line_start(node.lineno) : self.start(node)]
 
-    def starts_line(self, node: ast.AST) -> bool:
+    def starts_line(self, node: Located) -> bool:
         return not self.before(node).strip()
 
     def indent(self, line: int) -> str:
@@ -86,7 +87,7 @@ def _is_docstring(stmt: ast.stmt) -> bool:
 
 
 def _first_line(stmt: ast.stmt) -> int:
-    decorators = getattr(stmt, "decorator_list", ())
+    decorators: list[ast.expr] = getattr(stmt, "decorator_list", [])
     return min([stmt.lineno, *(d.lineno for d in decorators)])
 
 
@@ -136,17 +137,17 @@ class _Emitter:
             text = re.sub(r"(?<!\r)\n", self.newline, text)
         self.edits.append((start, end, order, len(self.edits), text))
 
-    def _replace(self, node: ast.AST, text: str) -> None:
+    def _replace(self, node: Located, text: str) -> None:
         self._edit(self.text.start(node), self.text.end(node), text)
 
     def _insert(self, offset: int, text: str, order: int = _CODE) -> None:
         self._edit(offset, offset, text, order)
 
-    def _wrap(self, node: ast.AST, opener: str) -> None:
+    def _wrap(self, node: Located, opener: str) -> None:
         self._insert(self.text.start(node), opener)
         self._insert(self.text.end(node), ")")
 
-    def _explain(self, node: ast.AST, message: str) -> None:
+    def _explain(self, node: Located, message: str) -> None:
         line, col = self.prepared.original_position(node.lineno, node.col_offset)
         self.explanations.append(Explanation(line, col, message))
 
@@ -166,6 +167,8 @@ class _Emitter:
     def _freeze_declaration(self, decl: ast.Assign | ast.AnnAssign) -> None:
         target = decl.targets[0] if isinstance(decl, ast.Assign) else decl.target
         value = decl.value
+        if value is None:
+            return
         if (
             isinstance(target, ast.Tuple) and isinstance(value, ast.Tuple)
             and len(target.elts) == len(value.elts)
@@ -401,12 +404,16 @@ class _Emitter:
     def _import_runtime(self) -> None:
         body = self.tree.body
         index = 1 if body and _is_docstring(body[0]) else 0
-        while index < len(body) and isinstance(body[index], ast.ImportFrom) and body[index].module == "__future__":
+        while index < len(body):
+            statement = body[index]
+            if not (isinstance(statement, ast.ImportFrom) and statement.module == "__future__"):
+                break
             index += 1
         if index == 0:
             offset = self.text.line_start(_first_line(body[0]))
         else:
-            offset = self.text.line_start(body[index - 1].end_lineno + 1)
+            last = body[index - 1]
+            offset = self.text.line_start((last.end_lineno or last.lineno) + 1)
         source = self.text.source
         lead = "\n" if offset == len(source) and source and not source.endswith(("\n", "\r")) else ""
         self._insert(offset, lead + "import neo.runtime\n", _IMPORT)

@@ -127,13 +127,23 @@ var count = 0
 
 * A `val` can never be rebound in its scope (NEO1001). That covers `=`,
   `+=`, `for`, `with ... as`, `import`, `del`, `global` and `nonlocal`.
+* A `val` may be declared once in each branch of an `if`/`elif`/`else` or a
+  `match`, since only one of them runs:
+
+  ```python
+  if verbose:
+      val LEVEL = "debug"
+  else:
+      val LEVEL = "info"
+  ```
 * Literals bound to a `val` are frozen at compile time, nested ones
   included: `list` becomes `tuple`, `dict` becomes `MappingProxyType`,
   `set` becomes `frozenset`. The annotation follows, so
   `val xs: list[int] = [1]` becomes `xs: tuple[int, ...] = (1,)`.
 * Changing a frozen `val` in place, as in `PRICES.append(3)` or
   `CONFIG["port"] = 80`, is an error (NEO1005); it would fail at run time
-  anyway. So is changing a frozen part of it, as in `CONFIG["db"]["host"] = "y"`.
+  anyway. So is changing a frozen part of it, as in `CONFIG["db"]["host"] = "y"`,
+  and `ROUTES[key].append(x)` when every item of `ROUTES` is a frozen literal.
   A value you build up step by step belongs in a `var`.
 * A `val` bound to any other object, such as `val cache = LRUCache()`, only
   promises not to be rebound. Its methods can be called as usual.
@@ -210,8 +220,8 @@ task def main(urls: list[str]) -> list[bytes]:
   `asyncio.wait_for`, `create_task`, `run_until_complete`, ...) are fine; to
   hand it to a helper of your own, assign it to a name first. A `compute`
   calling another `compute` is also NEO2006, because a worker process cannot
-  await. The check covers functions defined in the same file and called by
-  their own name, not through another name such as `f = work`.
+  await. The check covers functions defined in the same file, called by their
+  own name or through a plain alias such as `f = work`.
 * A job that calls `sys.exit()`, or raises an exception the caller cannot
   rebuild (one whose `__init__` takes two arguments, say), fails with
   `neo.runtime.ComputeError` instead. Its message names the original
@@ -274,10 +284,21 @@ def scale(xs: list[int], factor: float) -> list[float]: ...
 scale("abc", 2)   # CheckError: scale() argument 'xs' must be list, not str
 ```
 
-Only functions with the decorator are checked, and only their arguments,
-not their return values. The check is shallow: `list[int]` checks for
-`list` but not its elements. It follows `isinstance`, as mypy does, so `True`
-passes where an `int` is expected, and an `int` passes where a `float` is.
+Only functions with the decorator are checked. By default the check covers
+the arguments only and is shallow: `list[int]` checks for `list` but not its
+elements. Two options go further, at the cost of more work on every call:
+
+```python
+@neo.checked(deep=True)      # items of lists, tuples, sets and dicts too
+def load(rows: list[dict[str, int]]) -> None: ...
+# CheckError: load() argument 'rows'[2]['id'] must be int, not str
+
+@neo.checked(returns=True)   # the return value too
+def name() -> str: ...
+```
+
+The check follows `isinstance`, as mypy does, so `True` passes where an
+`int` is expected, and an `int` passes where a `float` is.
 
 ### `NEO_CHECKS=0`
 
@@ -304,8 +325,6 @@ unchanged, and `compute` stops checking picklability.
 
 ## Limits of this first version
 
-* A `val` has exactly one binding per scope. `if c: val x = 1 else: val x = 2`
-  is a NEO1001.
 * There is no ownership model. Aliasing a `val` parameter (`other = items;
   other.append(1)`) is not caught.
 * Tested on CPython 3.11, 3.12, 3.13 and 3.14. On 3.11, a `@neo.checked`
@@ -318,7 +337,8 @@ unchanged, and `compute` stops checking picklability.
 python -m unittest discover -s tests
 ```
 
-The package and the tests use only the standard library.
+The package and the tests use only the standard library. The `neo` package
+passes `mypy --strict`.
 
 ## License
 
