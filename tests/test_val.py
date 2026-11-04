@@ -1,14 +1,14 @@
-"""Step 2: val/var, freezing val literals, NEO1001/NEO1003, mutable defaults."""
+"""Step 2: val/var, freezing val literals, MOL1001/MOL1003, mutable defaults."""
 
 import unittest
 from types import MappingProxyType
 
-from helpers import HEADER, NeoTestCase, compile_neo, load
+from helpers import HEADER, MoltyTestCase, compile_molty, load
 
 
-class ValRebinding(NeoTestCase):
+class ValRebinding(MoltyTestCase):
     def test_rebinding_a_val_is_an_error(self):
-        self.assertError("val x = 1\nx = 2\n", "NEO1001")
+        self.assertError("val x = 1\nx = 2\n", "MOL1001")
 
     def test_reading_a_val_is_fine(self):
         self.assertClean("val x = 1\ny = x + 1\n")
@@ -30,12 +30,12 @@ class ValRebinding(NeoTestCase):
         ]
         for form in forms:
             with self.subTest(form):
-                self.assertError(f"val x = 1\n{form}\n", "NEO1001")
+                self.assertError(f"val x = 1\n{form}\n", "MOL1001")
 
     def test_rebinding_through_global_or_nonlocal_is_caught(self):
-        self.assertError("val x = 1\ndef f():\n    global x\n    x = 2\n", "NEO1001")
+        self.assertError("val x = 1\ndef f():\n    global x\n    x = 2\n", "MOL1001")
         self.assertError(
-            "def outer():\n    val x = 1\n    def inner():\n        nonlocal x\n        x = 2\n", "NEO1001"
+            "def outer():\n    val x = 1\n    def inner():\n        nonlocal x\n        x = 2\n", "MOL1001"
         )
 
     def test_shadowing_in_another_scope_is_fine(self):
@@ -71,26 +71,26 @@ class ValRebinding(NeoTestCase):
         self.assertEqual(mod.pick(False), frozenset({"b"}))
 
     def test_a_val_outside_and_inside_a_branch_is_still_an_error(self):
-        self.assertError("val Z = 1\nif True:\n    val Z = 2\n", "NEO1001")
-        self.assertError("if True:\n    val Z = 1\nif False:\n    val Z = 2\n", "NEO1001")
+        self.assertError("val Z = 1\nif True:\n    val Z = 2\n", "MOL1001")
+        self.assertError("if True:\n    val Z = 1\nif False:\n    val Z = 2\n", "MOL1001")
 
     def test_changing_a_val_that_is_frozen_in_every_branch_is_an_error(self):
         branches = "import sys\nif sys.argv:\n    val TAGS = ['a']\nelse:\n    val TAGS = ['b']\n"
-        self.assertError(branches + "TAGS.append('c')\n", "NEO1005")
+        self.assertError(branches + "TAGS.append('c')\n", "MOL1005")
         mixed = "import sys\nif sys.argv:\n    val TAGS = ['a']\nelse:\n    val TAGS = sys.argv\n"
         self.assertClean(mixed + "TAGS.append('c')\n")
 
     def test_val_over_a_parameter_is_an_error(self):
-        self.assertError("def f(x):\n    val x = 1\n", "NEO1001")
+        self.assertError("def f(x):\n    val x = 1\n", "MOL1001")
 
     def test_var_can_be_rebound(self):
         self.assertClean("var n = 0\nn += 1\nn = 5\n")
 
     def test_one_line_block(self):
-        self.assertError("if True: val x = 1; x = 2\n", "NEO1001")
+        self.assertError("if True: val x = 1; x = 2\n", "MOL1001")
 
 
-class FrozenValChanges(NeoTestCase):
+class FrozenValChanges(MoltyTestCase):
     def test_changing_a_frozen_val_is_an_error(self):
         changes = [
             "PRICES.append(3)",
@@ -109,14 +109,14 @@ class FrozenValChanges(NeoTestCase):
         )
         for change in changes:
             with self.subTest(change):
-                result = self.assertError(header + change + "\n", "NEO1005")
+                result = self.assertError(header + change + "\n", "MOL1005")
                 self.assertIn("was frozen to a", result.errors[0].message)
 
     def test_changing_a_frozen_part_of_a_val_is_an_error(self):
         header = "val CONFIG = {'db': {'host': 'x'}, 'ports': [80], 'pairs': [[1, 2]]}\n"
         for change in ["CONFIG['db']['host'] = 'y'", "CONFIG['ports'].append(443)", "CONFIG['pairs'][0].append(3)"]:
             with self.subTest(change):
-                result = self.assertError(header + change + "\n", "NEO1005")
+                result = self.assertError(header + change + "\n", "MOL1005")
                 self.assertIn("(part of val 'CONFIG')", result.errors[0].message)
 
     def test_any_key_into_an_all_frozen_literal_is_an_error(self):
@@ -125,7 +125,7 @@ class FrozenValChanges(NeoTestCase):
             "val GRID = [[0, 0], [0, 0]]\nfor i in range(2):\n    GRID[i][i] = 1\n",
         ]:
             with self.subTest(source):
-                self.assertError(source, "NEO1005")
+                self.assertError(source, "MOL1005")
 
     def test_any_key_into_a_literal_with_an_ordinary_item_is_fine(self):
         self.assertClean("val MIXED = {'db': {'h': 1}, 'n': 3}\nkey = 'db'\nMIXED[key]['h'] = 2\n")
@@ -161,22 +161,22 @@ class FrozenValChanges(NeoTestCase):
         )
 
 
-class Declarations(NeoTestCase):
+class Declarations(MoltyTestCase):
     def test_val_without_a_value_is_an_error(self):
-        self.assertError("val x: int\n", "NEO1003")
+        self.assertError("val x: int\n", "MOL1003")
 
     def test_val_with_a_value_is_fine(self):
         self.assertClean("val x: int = 1\n")
 
     def test_val_of_an_attribute_is_an_error(self):
-        self.assertError("class C: pass\nc = C()\nval c.x = 1\n", "NEO1003")
+        self.assertError("class C: pass\nc = C()\nval c.x = 1\n", "MOL1003")
 
     def test_val_must_start_an_assignment(self):
-        self.assertError("val x\n", "NEO1003")
-        self.assertError("val a = b = 1\n", "NEO1003")
+        self.assertError("val x\n", "MOL1003")
+        self.assertError("val a = b = 1\n", "MOL1003")
 
 
-class Freezing(NeoTestCase):
+class Freezing(MoltyTestCase):
     def test_literals_become_immutable(self):
         mod = load(
             """
@@ -215,17 +215,17 @@ class Freezing(NeoTestCase):
         source = 'val config = {\n    "host": "localhost",  # dev\n    "ports": [8080],\n}\n'
         expected = (
             HEADER
-            + "import neo.runtime\n"
-            + 'config = neo.runtime.MappingProxyType({\n    "host": "localhost",  # dev\n    "ports": (8080,),\n})\n'
+            + "import molty.runtime\n"
+            + 'config = molty.runtime.MappingProxyType({\n    "host": "localhost",  # dev\n    "ports": (8080,),\n})\n'
         )
-        self.assertEqual(compile_neo(source).code, expected)
+        self.assertEqual(compile_molty(source).code, expected)
 
     def test_annotations_follow_the_frozen_type(self):
-        code = compile_neo(
+        code = compile_molty(
             'val xs: list[int] = [1]\nval m: dict[str, list[int]] = {"a": [1]}\nval s: set[str] = {"a"}\n'
         ).code
         self.assertIn("xs: tuple[int, ...] = (1,)", code)
-        self.assertIn('m: neo.runtime.Mapping[str, tuple[int, ...]] = neo.runtime.MappingProxyType({"a": (1,)})', code)
+        self.assertIn('m: molty.runtime.Mapping[str, tuple[int, ...]] = molty.runtime.MappingProxyType({"a": (1,)})', code)
         self.assertIn('s: frozenset[str] = frozenset({"a"})', code)
 
     def test_builtin_calls_are_frozen_unless_shadowed(self):
@@ -233,22 +233,22 @@ class Freezing(NeoTestCase):
         self.assertEqual(load("def list(x):\n    return [x]\nval xs = list(1)\n").xs, [1])
 
     def test_explain_records_the_freeze(self):
-        result = compile_neo("val cfg = {'a': [1]}\n")
+        result = compile_molty("val cfg = {'a': [1]}\n")
         self.assertEqual([e.message for e in result.explanations], ["val cfg: dict -> MappingProxyType"])
 
 
 SHARED = "def add(x, items: list = []):\n    items.append(x)\n    return items\n"
 WARNING = (
     "default [] of 'items' is created once and shared by every call; "
-    "mark it '# neo: cache' if that is intended, or compile with --rewrite-defaults"
+    "mark it '# molty: cache' if that is intended, or compile with --rewrite-defaults"
 )
 
 
-class MutableDefaults(NeoTestCase):
-    """By default neoc only warns, so valid Python keeps its meaning."""
+class MutableDefaults(MoltyTestCase):
+    """By default moltyc only warns, so valid Python keeps its meaning."""
 
     def test_a_mutable_default_warns_and_is_left_alone(self):
-        result = self.assertWarning(SHARED, "NEO1004")
+        result = self.assertWarning(SHARED, "MOL1004")
         warning = result.warnings[0]
         self.assertEqual((warning.line, warning.col, warning.message), (1, 25, WARNING))
         self.assertEqual(result.code, HEADER + SHARED)
@@ -268,24 +268,24 @@ class MutableDefaults(NeoTestCase):
         ]
         for form in forms:
             with self.subTest(form):
-                self.assertWarning(f"import collections\ndef f(x={form}):\n    return x\n", "NEO1004")
-        self.assertWarning("def f(*, x=[]):\n    return x\n", "NEO1004")
-        self.assertWarning("f = lambda x=[]: x\n", "NEO1004")
+                self.assertWarning(f"import collections\ndef f(x={form}):\n    return x\n", "MOL1004")
+        self.assertWarning("def f(*, x=[]):\n    return x\n", "MOL1004")
+        self.assertWarning("f = lambda x=[]: x\n", "MOL1004")
 
     def test_a_shadowed_builtin_is_not_mutable(self):
         self.assertClean("def list():\n    return ()\ndef f(x=list()):\n    return x\n")
 
-    def test_neo_cache_marks_the_sharing_as_intended(self):
-        self.assertClean("def lookup(key, _cache={}):  # neo: cache\n    return _cache.setdefault(key, len(_cache))\n")
-        self.assertClean("def lookup(\n    key,\n    _cache={},  # neo: cache\n):\n    return _cache\n")
+    def test_molty_cache_marks_the_sharing_as_intended(self):
+        self.assertClean("def lookup(key, _cache={}):  # molty: cache\n    return _cache.setdefault(key, len(_cache))\n")
+        self.assertClean("def lookup(\n    key,\n    _cache={},  # molty: cache\n):\n    return _cache\n")
 
-    def test_neo_cache_on_another_line_does_not_count(self):
-        self.assertWarning("# neo: cache\ndef lookup(key, _cache={}):\n    return _cache\n", "NEO1004")
-        self.assertWarning("def lookup(  # neo: cache\n    key,\n    _cache={},\n):\n    return _cache\n", "NEO1004")
+    def test_molty_cache_on_another_line_does_not_count(self):
+        self.assertWarning("# molty: cache\ndef lookup(key, _cache={}):\n    return _cache\n", "MOL1004")
+        self.assertWarning("def lookup(  # molty: cache\n    key,\n    _cache={},\n):\n    return _cache\n", "MOL1004")
 
 
-class RewriteDefaults(NeoTestCase):
-    """neoc --rewrite-defaults: a fresh object per call, recorded for --explain."""
+class RewriteDefaults(MoltyTestCase):
+    """moltyc --rewrite-defaults: a fresh object per call, recorded for --explain."""
 
     def test_a_default_list_is_fresh_on_every_call(self):
         mod = load(SHARED, rewrite_defaults=True)
@@ -299,8 +299,8 @@ class RewriteDefaults(NeoTestCase):
         )
         self.assertIn("def f(items: list | None = None):", result.code)
 
-    def test_neo_cache_is_still_left_alone(self):
-        source = "def lookup(key, _cache={}):  # neo: cache\n    return _cache\n"
+    def test_molty_cache_is_still_left_alone(self):
+        source = "def lookup(key, _cache={}):  # molty: cache\n    return _cache\n"
         self.assertEqual(self.assertClean(source, rewrite_defaults=True).code, HEADER + source)
 
     def test_a_default_that_reads_other_names_is_not_moved(self):
@@ -317,7 +317,7 @@ class RewriteDefaults(NeoTestCase):
             """
         result = self.assertCompiles(source, rewrite_defaults=True)
         messages = [w.message for w in result.warnings]
-        self.assertEqual([w.code for w in result.warnings], ["NEO1004", "NEO1004"])
+        self.assertEqual([w.code for w in result.warnings], ["MOL1004", "MOL1004"])
         self.assertIn("because it uses 'UNIT'", messages[0])
         self.assertIn("because it uses 'seq'", messages[1])
         self.assertEqual(result.explanations, [])
@@ -335,7 +335,7 @@ class RewriteDefaults(NeoTestCase):
                 return items
             """
         result = self.assertCompiles(source, rewrite_defaults=True)
-        self.assertEqual([w.code for w in result.warnings], ["NEO1004", "NEO1004"])
+        self.assertEqual([w.code for w in result.warnings], ["MOL1004", "MOL1004"])
         self.assertIn("because it uses 'list'", result.warnings[0].message)
         self.assertIn("because it uses 'set'", result.warnings[1].message)
         mod = load(source, rewrite_defaults=True)
@@ -357,7 +357,7 @@ class RewriteDefaults(NeoTestCase):
         self.assertIsNot(mod.a(), mod.a())
 
     def test_a_lambda_cannot_be_rewritten(self):
-        result = self.assertWarning("f = lambda x=[]: x\n", "NEO1004", rewrite_defaults=True)
+        result = self.assertWarning("f = lambda x=[]: x\n", "MOL1004", rewrite_defaults=True)
         self.assertIn("--rewrite-defaults cannot rewrite a lambda", result.warnings[0].message)
 
     def test_every_shape_of_function(self):

@@ -1,4 +1,4 @@
-"""The Neo compiler: ``.neo.py`` source in, plain Python out.
+"""The Molty compiler: ``.molty.py`` source in, plain Python out.
 
     pre-pass (tokens) -> ast.parse -> checks (rules) -> emit
 """
@@ -9,9 +9,9 @@ import ast
 import tokenize
 from dataclasses import dataclass, field
 
-from neo.compiler import emit, rules, tokens
-from neo.compiler.emit import Explanation
-from neo.compiler.rules import ERROR, WARNING, Diagnostic
+from molty.compiler import emit, rules, tokens
+from molty.compiler.emit import Explanation
+from molty.compiler.rules import ERROR, WARNING, Diagnostic
 
 __all__ = ["CompileResult", "Diagnostic", "Explanation", "compile_source"]
 
@@ -35,9 +35,9 @@ class CompileResult:
         return [d for d in self.diagnostics if d.severity == WARNING]
 
 
-def compile_source(source: str, filename: str = "<neo>", *, rewrite_defaults: bool = False) -> CompileResult:
-    """Compile Neo source to Python.  With ``rewrite_defaults`` a mutable default
-    argument gets a fresh object per call instead of a NEO1004 warning."""
+def compile_source(source: str, filename: str = "<molty>", *, rewrite_defaults: bool = False) -> CompileResult:
+    """Compile Molty source to Python.  With ``rewrite_defaults`` a mutable default
+    argument gets a fresh object per call instead of a MOL1004 warning."""
     try:
         prepared = tokens.prepare(source)
     except (SyntaxError, tokenize.TokenError) as exc:
@@ -64,12 +64,12 @@ def _syntax_error(exc: SyntaxError, prepared: tokens.Prepared, utf8: bool) -> Di
     col = max((exc.offset or 1) - 1, 0)
     # The parser reports character offsets; errors from compiling the tree carry utf-8 ones.
     line, col = prepared.original_position(line, col) if utf8 else prepared.original_char_position(line, col)
-    return Diagnostic("NEO0001", ERROR, exc.msg, line, col)
+    return Diagnostic("MOL0001", ERROR, exc.msg, line, col)
 
 
 def _untokenizable(source: str, filename: str, exc: Exception) -> Diagnostic:
     try:
         ast.parse(source, filename)  # the parser gives the better message
     except SyntaxError as parse_error:
-        return Diagnostic("NEO0001", ERROR, parse_error.msg, parse_error.lineno or 1, max((parse_error.offset or 1) - 1, 0))
-    return Diagnostic("NEO0001", ERROR, str(exc), 1, 0)
+        return Diagnostic("MOL0001", ERROR, parse_error.msg, parse_error.lineno or 1, max((parse_error.offset or 1) - 1, 0))
+    return Diagnostic("MOL0001", ERROR, str(exc), 1, 0)

@@ -1,4 +1,4 @@
-"""Pre-pass: rewrite the Neo keywords into plain Python before ``ast.parse``.
+"""Pre-pass: rewrite the Molty keywords into plain Python before ``ast.parse``.
 
 Only these forms are recognized:
 
@@ -6,7 +6,7 @@ Only these forms are recognized:
 * ``NAME: val TYPE`` inside the parameter list of a ``def``
 * ``task def`` (becomes ``async def``) and ``compute def`` (becomes ``def``)
 
-It also notes which lines carry a ``# neo: cache`` comment.
+It also notes which lines carry a ``# molty: cache`` comment.
 
 Each of them is a pair of adjacent names (or a name followed by ``def``),
 which valid Python never contains, so every valid Python file passes through
@@ -32,7 +32,7 @@ _BLOCK_HEADS = frozenset(
 )
 _SKIPPED = frozenset({tokenize.COMMENT, tokenize.NL, tokenize.ENCODING})
 _LINE_BREAKS = frozenset({tokenize.NEWLINE, tokenize.INDENT, tokenize.DEDENT, tokenize.ENDMARKER})
-_CACHE_COMMENT = re.compile(r"#\s*neo:\s*cache\b")
+_CACHE_COMMENT = re.compile(r"#\s*molty:\s*cache\b")
 
 
 def split_lines(source: str) -> list[str]:
@@ -83,7 +83,7 @@ class PositionMap:
 
 @dataclass
 class Prepared:
-    """The rewritten source plus where each Neo construct ended up in it.
+    """The rewritten source plus where each Molty construct ended up in it.
 
     Marker positions are ``(line, utf8_column)`` pairs in the rewritten source,
     the same coordinates ``ast`` nodes carry.
@@ -97,7 +97,7 @@ class Prepared:
     val_params: set[tuple[int, int]] = field(default_factory=set)  # the ast.arg node
     tasks: set[tuple[int, int]] = field(default_factory=set)  # the AsyncFunctionDef node
     computes: set[tuple[int, int]] = field(default_factory=set)  # the FunctionDef node
-    cache_lines: set[int] = field(default_factory=set)  # lines with a ``# neo: cache`` comment
+    cache_lines: set[int] = field(default_factory=set)  # lines with a ``# molty: cache`` comment
 
     def __post_init__(self) -> None:
         self._original_lines = split_lines(self.original)
@@ -135,7 +135,7 @@ def _removal(tok: tokenize.TokenInfo, following: tokenize.TokenInfo) -> _Edit:
 
 
 def prepare(source: str) -> Prepared:
-    """Rewrite Neo-only syntax to plain Python.  Raises ``SyntaxError`` or
+    """Rewrite Molty-only syntax to plain Python.  Raises ``SyntaxError`` or
     ``tokenize.TokenError`` when the source cannot even be tokenized."""
     readline = io.StringIO(source, newline="").readline
     every = list(tokenize.generate_tokens(readline))

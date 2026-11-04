@@ -1,4 +1,4 @@
-"""Step 6: @neo.checked, and NEO_CHECKS=0 turning every run-time check off."""
+"""Step 6: @molty.checked, and MOLTY_CHECKS=0 turning every run-time check off."""
 
 import asyncio
 import inspect
@@ -13,35 +13,35 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from helpers import NeoTestCase, compile_neo, load
+from helpers import MoltyTestCase, compile_molty, load
 
-import neo
-from neo.runtime import CheckError
+import molty
+from molty.runtime import CheckError
 
 SOURCE = """
-    import neo
+    import molty
     from typing import Any, Optional
 
-    @neo.checked
+    @molty.checked
     def scale(xs: list[int], factor: float = 1.0, *, label: Optional[str] = None) -> list[float]:
         return [x * factor for x in xs]
 
-    @neo.checked
+    @molty.checked
     def count(xs: list[int]) -> int:
         return len(xs)
 
-    @neo.checked
+    @molty.checked
     def loose(a, b: Any, c: object, *rest: int, **named: str) -> None:
         pass
 
-    @neo.checked
+    @molty.checked
     def later(node: "Node") -> str:
         return node.name
 
     class Node:
         name = "node"
 
-    @neo.checked
+    @molty.checked
     task def fetch(url: str) -> str:
         return url
 
@@ -50,7 +50,7 @@ SOURCE = """
     """
 
 
-class Checked(NeoTestCase):
+class Checked(MoltyTestCase):
     @classmethod
     def setUpClass(cls):
         cls.mod = load(SOURCE)
@@ -96,23 +96,23 @@ class Checked(NeoTestCase):
         self.assertEqual(self.mod.unchecked("abc"), 3)
 
 
-class DeepAndReturnChecks(NeoTestCase):
+class DeepAndReturnChecks(MoltyTestCase):
     SOURCE = """
-        import neo
+        import molty
 
-        @neo.checked(deep=True)
+        @molty.checked(deep=True)
         def deep(xs: list[int], table: dict[str, list[float]], pair: tuple[int, str], tags: set[str] | None = None) -> int:
             return len(xs)
 
-        @neo.checked
+        @molty.checked
         def shallow(xs: list[int]) -> int:
             return len(xs)
 
-        @neo.checked(returns=True)
+        @molty.checked(returns=True)
         def lies(n: int) -> str:
             return n
 
-        @neo.checked(deep=True, returns=True)
+        @molty.checked(deep=True, returns=True)
         task def fetch(n: int) -> list[str]:
             return [str(n), n]
         """
@@ -144,22 +144,22 @@ class DeepAndReturnChecks(NeoTestCase):
         with self.assertRaisesRegex(CheckError, re.escape("fetch() return value[1] must be str, not int")):
             asyncio.run(self.mod.fetch(1))
 
-    def test_neo_checks_0_turns_these_off_too(self):
-        with mock.patch.dict(os.environ, {"NEO_CHECKS": "0"}):
+    def test_molty_checks_0_turns_these_off_too(self):
+        with mock.patch.dict(os.environ, {"MOLTY_CHECKS": "0"}):
             mod = load(self.SOURCE)
         self.assertEqual(mod.lies(1), 1)
         self.assertEqual(mod.deep(["x"], {}, (1, "a")), 1)
 
 
-class FrozenValues(NeoTestCase):
+class FrozenValues(MoltyTestCase):
     SOURCE = """
-        import neo
+        import molty
         val PRICES = [100, 200]
         val LIMITS = {"daily": 500}
-        @neo.checked
+        @molty.checked
         def total(xs: val list[int], limits: val dict[str, int], tags: val set[str] | None = None) -> int:
             return sum(xs)
-        @neo.checked
+        @molty.checked
         def grow(xs: list[int]) -> list[int]:
             xs.append(0)
             return xs
@@ -168,8 +168,8 @@ class FrozenValues(NeoTestCase):
     def test_a_val_parameter_takes_frozen_values(self):
         result = self.assertClean(self.SOURCE)
         self.assertIn(
-            "def total(xs: neo.runtime.Sequence[int], limits: neo.runtime.Mapping[str, int], "
-            "tags: neo.runtime.AbstractSet[str] | None = None) -> int:",
+            "def total(xs: molty.runtime.Sequence[int], limits: molty.runtime.Mapping[str, int], "
+            "tags: molty.runtime.AbstractSet[str] | None = None) -> int:",
             result.code,
         )
         mod = load(self.SOURCE)
@@ -182,17 +182,17 @@ class FrozenValues(NeoTestCase):
             mod.grow(mod.PRICES)
 
 
-class ChecksOff(NeoTestCase):
-    def test_neo_checks_0_returns_the_function_untouched(self):
-        with mock.patch.dict(os.environ, {"NEO_CHECKS": "0"}):
+class ChecksOff(MoltyTestCase):
+    def test_molty_checks_0_returns_the_function_untouched(self):
+        with mock.patch.dict(os.environ, {"MOLTY_CHECKS": "0"}):
             mod = load(SOURCE)
         self.assertFalse(hasattr(mod.scale, "__wrapped__"))
         self.assertEqual(mod.count("abc"), 3)
 
-    def test_neo_checks_0_turns_off_pickle_checks(self):
+    def test_molty_checks_0_turns_off_pickle_checks(self):
         source = "compute def f(cb):\n    return cb()\n"
         self.assertEqual(load(source).f.check_args, ("cb",))
-        with mock.patch.dict(os.environ, {"NEO_CHECKS": "0"}):
+        with mock.patch.dict(os.environ, {"MOLTY_CHECKS": "0"}):
             mod = load(source)
         self.assertEqual((mod.f.check_args, mod.f.check_result), ((), False))
 
@@ -200,12 +200,12 @@ class ChecksOff(NeoTestCase):
         directory = tempfile.mkdtemp()
         self.addCleanup(shutil.rmtree, directory)
         script = Path(directory) / "app.py"
-        script.write_text(compile_neo(textwrap.dedent(SOURCE) + "print(count('abc'))\n").code)
-        package_root = str(Path(neo.__file__).resolve().parent.parent)  # works without installing neo
-        env = dict(os.environ, NEO_CHECKS="0", PYTHONPATH=package_root)
+        script.write_text(compile_molty(textwrap.dedent(SOURCE) + "print(count('abc'))\n").code)
+        package_root = str(Path(molty.__file__).resolve().parent.parent)  # works without installing molty
+        env = dict(os.environ, MOLTY_CHECKS="0", PYTHONPATH=package_root)
         done = subprocess.run([sys.executable, str(script)], env=env, capture_output=True, text=True)
         self.assertEqual(done.stdout, "3\n", done.stderr)
-        env["NEO_CHECKS"] = "1"
+        env["MOLTY_CHECKS"] = "1"
         done = subprocess.run([sys.executable, str(script)], env=env, capture_output=True, text=True)
         self.assertIn("CheckError: count() argument 'xs' must be list, not str", done.stderr)
 

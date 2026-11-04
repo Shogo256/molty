@@ -3,30 +3,40 @@ requires = ["setuptools>=77"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "python-neo"
+name = "molty"
 version = "0.1.0"
 description = "A strict superset of Python that turns common Python traps into compile-time errors."
 readme = "README.md"
 requires-python = ">=3.11"
 license = "Apache-2.0"
 license-files = ["LICENSE"]
+authors = [{ name = "Shogo Toda" }]
 dependencies = []
-keywords = ["python", "transpiler", "immutability", "concurrency"]
+keywords = ["python", "superset", "transpiler", "immutability", "concurrency", "asyncio", "multiprocessing"]
 classifiers = [
     "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "Operating System :: POSIX :: Linux",
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
     "Programming Language :: Python :: 3.13",
     "Programming Language :: Python :: 3.14",
     "Topic :: Software Development :: Compilers",
+    "Topic :: Software Development :: Quality Assurance",
+    "Typing :: Typed",
 ]
 
+[project.urls]
+Homepage = "https://github.com/Shogo256/molty"
+Repository = "https://github.com/Shogo256/molty"
+Issues = "https://github.com/Shogo256/molty/issues"
+
 [project.scripts]
-neoc = "neo.compiler.cli:main"
+moltyc = "molty.compiler.cli:main"
 
 [tool.setuptools.packages.find]
-include = ["neo", "neo.*"]
+include = ["molty", "molty.*"]
 
 [tool.setuptools.package-data]
-neo = ["py.typed"]
+molty = ["py.typed"]

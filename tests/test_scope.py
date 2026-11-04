@@ -1,10 +1,10 @@
-"""Step 5: scope(), NEO2003, and task and compute spawned together."""
+"""Step 5: scope(), MOL2003, and task and compute spawned together."""
 
 import asyncio
 import os
 import unittest
 
-from helpers import ComputeTestCase, compile_neo, load
+from helpers import ComputeTestCase, compile_molty, load
 
 MIXED = """
     import asyncio
@@ -35,8 +35,8 @@ class Scopes(ComputeTestCase):
         self.assertNotIn(os.getpid(), (pid3, pid4))
 
     def test_scope_compiles_to_the_runtime_task_group(self):
-        code = compile_neo(MIXED).code
-        self.assertIn("async with neo.runtime.scope() as s:", code)
+        code = compile_molty(MIXED).code
+        self.assertIn("async with molty.runtime.scope() as s:", code)
         self.assertIn("s.spawn(pid_and_square(3))", code)
 
     def test_results_only_after_the_block(self):
@@ -93,7 +93,7 @@ class Scopes(ComputeTestCase):
 class CreateTask(ComputeTestCase):
     def test_create_task_outside_a_scope_warns(self):
         self.assertWarning(
-            "import asyncio\ntask def f(): pass\ntask def main():\n    asyncio.create_task(f())\n", "NEO2003"
+            "import asyncio\ntask def f(): pass\ntask def main():\n    asyncio.create_task(f())\n", "MOL2003"
         )
 
     def test_create_task_inside_a_scope_is_quiet(self):
@@ -106,7 +106,7 @@ class CreateTask(ComputeTestCase):
         self.assertWarning(
             "import asyncio\ntask def main():\n    async with scope() as s:\n"
             "        def later():\n            asyncio.create_task(main())\n",
-            "NEO2003",
+            "MOL2003",
         )
 
 
@@ -122,13 +122,13 @@ class ScopeNames(ComputeTestCase):
                     asyncio.create_task(asyncio.sleep(0))
                 return s
             """
-        result = self.assertWarning(source, "NEO2003")  # not a Neo scope, so create_task still warns
-        self.assertNotIn("neo.runtime", result.code)
+        result = self.assertWarning(source, "MOL2003")  # not a Molty scope, so create_task still warns
+        self.assertNotIn("molty.runtime", result.code)
         self.assertEqual(asyncio.run(load(source).main()), "mine")
 
-    def test_scope_imported_from_neo(self):
+    def test_scope_imported_from_molty(self):
         source = """
-            from neo import scope
+            from molty import scope
             task def one():
                 return 1
             task def main():
@@ -136,7 +136,7 @@ class ScopeNames(ComputeTestCase):
                     s.spawn(one())
                 return s.results()
             """
-        self.assertNotIn("neo.runtime.scope", self.assertClean(source).code)
+        self.assertNotIn("molty.runtime.scope", self.assertClean(source).code)
         self.assertEqual(asyncio.run(load(source).main()), [1])
 
 

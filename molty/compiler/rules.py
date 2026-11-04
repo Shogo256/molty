@@ -1,19 +1,19 @@
-"""Neo-specific checks on the parsed tree.
+"""Molty-specific checks on the parsed tree.
 
 Codes:
 
-    NEO1001  a ``val`` name is rebound
-    NEO1002  a ``val`` parameter is rebound, or mutated through a built-in mutating method
-    NEO1003  a malformed ``val``/``var`` declaration
-    NEO1004  (warning) a mutable default argument, shared by every call
-    NEO1005  a ``val`` holding a frozen literal is changed in place
-    NEO2001  a ``compute`` function calls a ``task``
-    NEO2002  (warning) ``threading.Thread`` created inside a ``task`` or ``compute``
-    NEO2003  (warning) ``asyncio.create_task`` called outside ``scope()``
-    NEO2004  a ``compute`` argument or return type cannot be pickled
-    NEO2005  a ``compute def`` that worker processes cannot import
-    NEO2006  (warning) a task or compute called without awaiting or handing on its coroutine
-    NEO2007  ``@neo.isolated`` on something other than a ``compute def``
+    MOL1001  a ``val`` name is rebound
+    MOL1002  a ``val`` parameter is rebound, or mutated through a built-in mutating method
+    MOL1003  a malformed ``val``/``var`` declaration
+    MOL1004  (warning) a mutable default argument, shared by every call
+    MOL1005  a ``val`` holding a frozen literal is changed in place
+    MOL2001  a ``compute`` function calls a ``task``
+    MOL2002  (warning) ``threading.Thread`` created inside a ``task`` or ``compute``
+    MOL2003  (warning) ``asyncio.create_task`` called outside ``scope()``
+    MOL2004  a ``compute`` argument or return type cannot be pickled
+    MOL2005  a ``compute def`` that worker processes cannot import
+    MOL2006  (warning) a task or compute called without awaiting or handing on its coroutine
+    MOL2007  ``@molty.isolated`` on something other than a ``compute def``
 
 Ordinary type checking is left to mypy and pyright.
 """
@@ -25,12 +25,12 @@ from dataclasses import dataclass, field
 from collections.abc import Iterable, Iterator
 from typing import NamedTuple, Protocol
 
-from neo.compiler.tokens import Prepared
+from molty.compiler.tokens import Prepared
 
 ERROR = "error"
 WARNING = "warning"
 
-# Mutating methods of the built-in list, dict and set.  NEO1002 looks at
+# Mutating methods of the built-in list, dict and set.  MOL1002 looks at
 # exactly these names and nothing else; there is no ownership model.
 MUTATING_METHODS: dict[str, tuple[str, ...]] = {
     "append": ("list",),
@@ -59,10 +59,10 @@ MUTATING_METHODS: dict[str, tuple[str, ...]] = {
     "__ixor__": ("set",),
 }
 
-NEO_SCOPE_NAMES = frozenset({"scope", "neo.scope", "neo.runtime.scope"})
-NEO_ISOLATED_NAMES = frozenset({"neo.isolated", "neo.runtime.isolated"})
+MOLTY_SCOPE_NAMES = frozenset({"scope", "molty.scope", "molty.runtime.scope"})
+MOLTY_ISOLATED_NAMES = frozenset({"molty.isolated", "molty.runtime.isolated"})
 
-# What a val's value becomes once neoc freezes it (see emit.py).
+# What a val's value becomes once moltyc freezes it (see emit.py).
 _FROZEN_DISPLAYS = {
     ast.List: "tuple", ast.ListComp: "tuple", ast.Tuple: "tuple",
     ast.Dict: "MappingProxyType", ast.DictComp: "MappingProxyType",
@@ -499,7 +499,7 @@ class Analysis:
     val_decls: list[ast.Assign | ast.AnnAssign] = field(default_factory=list)
     tasks: list[ast.AsyncFunctionDef] = field(default_factory=list)
     computes: list[ComputeInfo] = field(default_factory=list)
-    scope_names: list[ast.Name] = field(default_factory=list)  # bare ``scope`` -> neo.runtime.scope
+    scope_names: list[ast.Name] = field(default_factory=list)  # bare ``scope`` -> molty.runtime.scope
     mutable_defaults: list[MutableDefault] = field(default_factory=list)  # to rewrite (--rewrite-defaults)
     val_params: list[ast.arg] = field(default_factory=list)
 
@@ -587,7 +587,7 @@ class _Analyzer:
             child: parent for parent in ast.walk(tree) for child in ast.iter_child_nodes(parent)
         }
         self.val_targets: set[Located] = set()
-        self.frozen_vals: dict[Located, ast.expr] = {}  # val name -> the literal neoc froze
+        self.frozen_vals: dict[Located, ast.expr] = {}  # val name -> the literal moltyc froze
         self.val_params: list[tuple[ast.arg, ast.FunctionDef | ast.AsyncFunctionDef]] = []
         self.task_nodes: set[object] = set()
         self.compute_nodes: list[ast.FunctionDef] = []
@@ -635,19 +635,19 @@ class _Analyzer:
                         self.result.val_params.append(arg)
         for kind, keys in (("val", prepared.val_decls), ("var", prepared.var_decls)):
             for key in sorted(keys - found[kind]):
-                self._report("NEO1003", ERROR, key, f"'{kind}' must start an assignment, as in '{kind} name = value'")
+                self._report("MOL1003", ERROR, key, f"'{kind}' must start an assignment, as in '{kind} name = value'")
 
     def _declaration(self, node: ast.Assign | ast.AnnAssign, kind: str) -> None:
         if isinstance(node, ast.Assign) and len(node.targets) > 1:
-            self._report("NEO1003", ERROR, node, f"'{kind}' declares one target; split 'a = b = ...' into separate declarations")
+            self._report("MOL1003", ERROR, node, f"'{kind}' declares one target; split 'a = b = ...' into separate declarations")
             return
         target = node.targets[0] if isinstance(node, ast.Assign) else node.target
         names = _declared_names(target)
         if names is None:
-            self._report("NEO1003", ERROR, target, f"'{kind}' can only declare plain names, not '{ast.unparse(target)}'")
+            self._report("MOL1003", ERROR, target, f"'{kind}' can only declare plain names, not '{ast.unparse(target)}'")
             return
         if kind == "val" and node.value is None:
-            self._report("NEO1003", ERROR, node, f"'val {names[0].id}' needs a value; a val can never be assigned later")
+            self._report("MOL1003", ERROR, node, f"'val {names[0].id}' needs a value; a val can never be assigned later")
             return
         if kind == "val":
             self.result.val_decls.append(node)
@@ -667,13 +667,13 @@ class _Analyzer:
             self.frozen_vals[target] = value
 
     def _frozen_kind(self, value: ast.expr) -> str | None:
-        """What neoc freezes ``value`` into, if it freezes it."""
+        """What moltyc freezes ``value`` into, if it freezes it."""
         kind = _FROZEN_DISPLAYS.get(type(value))
         if kind is None and isinstance(value, ast.Call):
             kind = _FROZEN_CALLS.get(self.names.qualified_name(value.func) or "")
         return kind
 
-    # NEO1001 ---------------------------------------------------------------------
+    # MOL1001 ---------------------------------------------------------------------
 
     def _check_val_names(self) -> None:
         for scope in self.names.scopes:
@@ -687,13 +687,13 @@ class _Analyzer:
                     if binding is first:
                         continue
                     if binding.kind == "param":
-                        self._report("NEO1001", ERROR, first.node, f"cannot declare val '{name}': it is already a parameter")
+                        self._report("MOL1001", ERROR, first.node, f"cannot declare val '{name}': it is already a parameter")
                         continue
                     # One val per branch of an if/elif/else or a match is still one binding per run.
                     earlier = [b for b in declared if (b.node.lineno, b.node.col_offset) < (binding.node.lineno, binding.node.col_offset)]
                     if binding in declared and all(self._exclusive(binding.node, b.node) for b in earlier):
                         continue
-                    self._report("NEO1001", ERROR, binding.node,
+                    self._report("MOL1001", ERROR, binding.node,
                                  f"cannot rebind '{name}': it is declared val at line {first.node.lineno}")
 
     def _exclusive(self, a: Located, b: Located) -> bool:
@@ -713,11 +713,11 @@ class _Analyzer:
         mine, theirs = branches(a), branches(b)
         return any(mine[node] != theirs[node] for node in mine.keys() & theirs.keys())
 
-    # NEO1005 ---------------------------------------------------------------------
+    # MOL1005 ---------------------------------------------------------------------
 
     def _check_frozen_vals(self) -> None:
         # A val bound to any other object only promises not to be rebound, so
-        # only the values neoc froze itself are checked: changing those always
+        # only the values moltyc froze itself are checked: changing those always
         # fails at run time, and catching it here has no false positives.
         for owner in self.names.scopes:
             for name, bindings in owner.bindings.items():
@@ -734,7 +734,7 @@ class _Analyzer:
                         continue
                     kind = " or ".join(sorted({self._frozen_kind(part) or "" for part in parts}))
                     where = f"val '{name}'" if node is use else f"'{ast.unparse(node)}' (part of val '{name}')"
-                    self._report("NEO1005", ERROR, use,
+                    self._report("MOL1005", ERROR, use,
                                  f"{where} was frozen to a {kind}, which cannot be changed by {how}; "
                                  f"declare '{name}' with var if it has to change")
 
@@ -759,7 +759,7 @@ class _Analyzer:
                 items += found
             node, parts = parent, items
 
-    # NEO1002 ---------------------------------------------------------------------
+    # MOL1002 ---------------------------------------------------------------------
 
     def _check_val_params(self) -> None:
         for arg, func in self.val_params:
@@ -772,13 +772,13 @@ class _Analyzer:
                     message = f"val parameter '{arg.arg}' is modified by '{_AUGMENTED[type(parent.op)]}='"
                 else:
                     message = f"cannot rebind val parameter '{arg.arg}'"
-                self._report("NEO1002", ERROR, binding.node, message)
+                self._report("MOL1002", ERROR, binding.node, message)
             for use in self.names.loads.get(arg.arg, []):
                 if self.names.owner(arg.arg, self.names.load_scope[use]) is not scope:
                     continue
                 how = self._mutation(use)
                 if how:
-                    self._report("NEO1002", ERROR, use, f"val parameter '{arg.arg}' is mutated by {how}")
+                    self._report("MOL1002", ERROR, use, f"val parameter '{arg.arg}' is mutated by {how}")
 
     def _mutation(self, use: ast.expr) -> str | None:
         parent = self.parents.get(use)
@@ -793,7 +793,7 @@ class _Analyzer:
                 return "item deletion (__delitem__)"
         return None
 
-    # NEO1004 ---------------------------------------------------------------------
+    # MOL1004 ---------------------------------------------------------------------
 
     def _check_mutable_defaults(self) -> None:
         cache_lines = self.prepared.cache_lines
@@ -804,7 +804,7 @@ class _Analyzer:
                 if not self._is_mutable_default(default):
                     continue
                 if cache_lines.intersection(range(arg.lineno, (default.end_lineno or arg.lineno) + 1)):
-                    continue  # ``# neo: cache``: the sharing is intended
+                    continue  # ``# molty: cache``: the sharing is intended
                 blocker = self._unmovable_name(default, func)
                 if self.rewrite_defaults and not isinstance(func, ast.Lambda) and blocker is None:
                     self.result.mutable_defaults.append(MutableDefault(func, arg, default))
@@ -813,13 +813,13 @@ class _Analyzer:
                 if len(shown) > 24:
                     shown = shown[:21] + "..."
                 if isinstance(func, ast.Lambda):
-                    hint = "mark it '# neo: cache' if that is intended; --rewrite-defaults cannot rewrite a lambda"
+                    hint = "mark it '# molty: cache' if that is intended; --rewrite-defaults cannot rewrite a lambda"
                 elif self.rewrite_defaults:
                     hint = (f"--rewrite-defaults leaves it alone because it uses '{blocker}', which would not mean "
-                            "the same inside the function body; mark it '# neo: cache' if that is intended")
+                            "the same inside the function body; mark it '# molty: cache' if that is intended")
                 else:
-                    hint = "mark it '# neo: cache' if that is intended, or compile with --rewrite-defaults"
-                self._report("NEO1004", WARNING, default,
+                    hint = "mark it '# molty: cache' if that is intended, or compile with --rewrite-defaults"
+                self._report("MOL1004", WARNING, default,
                              f"default {shown} of '{arg.arg}' is created once and shared by every call; {hint}")
 
     def _is_mutable_default(self, node: ast.expr) -> bool:
@@ -856,37 +856,37 @@ class _Analyzer:
             return node.id
         return None
 
-    # NEO2004, NEO2005 ------------------------------------------------------------
+    # MOL2004, MOL2005 ------------------------------------------------------------
 
     def _check_computes(self) -> None:
         picklability = _Picklability(self.names)
         for func in self.compute_nodes:
             scope = self.names.def_scope[func]
             if scope is not self.names.module:
-                self._report("NEO2005", ERROR, func,
+                self._report("MOL2005", ERROR, func,
                              f"compute '{func.name}' must be defined at module level; worker processes import it by name")
                 continue
             if any(isinstance(n, (ast.Yield, ast.YieldFrom)) for n in _local_nodes(func.body)):
-                self._report("NEO2005", ERROR, func,
+                self._report("MOL2005", ERROR, func,
                              f"compute '{func.name}' cannot be a generator; a generator cannot leave the worker process")
                 continue
             check_args = []
             for arg in all_args(func.args):
                 verdict = picklability.classify(arg.annotation, scope)
                 if verdict == UNPICKLABLE and arg.annotation is not None:
-                    self._report("NEO2004", ERROR, arg.annotation,
+                    self._report("MOL2004", ERROR, arg.annotation,
                                  f"argument '{arg.arg}' of compute '{func.name}' is '{ast.unparse(arg.annotation)}', "
                                  "which cannot be pickled into a worker process")
                 elif verdict == UNKNOWN:
                     check_args.append(arg.arg)
             verdict = picklability.classify(func.returns, scope)
             if verdict == UNPICKLABLE and func.returns is not None:
-                self._report("NEO2004", ERROR, func.returns,
+                self._report("MOL2004", ERROR, func.returns,
                              f"compute '{func.name}' returns '{ast.unparse(func.returns)}', "
                              "which cannot be pickled back from a worker process")
             self.result.computes.append(ComputeInfo(func, tuple(check_args), verdict == UNKNOWN))
 
-    # NEO2001, NEO2002, NEO2003 ----------------------------------------------------
+    # MOL2001, MOL2002, MOL2003 ----------------------------------------------------
 
     def _visit(self, node: ast.AST, ctx: _Context) -> None:
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
@@ -897,7 +897,7 @@ class _Analyzer:
                 compute=node if isinstance(node, ast.FunctionDef) and node in self.compute_nodes else ctx.compute,
                 in_scope=False,
             )
-        elif isinstance(node, ast.AsyncWith) and any(self._is_neo_scope(i.context_expr) for i in node.items):
+        elif isinstance(node, ast.AsyncWith) and any(self._is_molty_scope(i.context_expr) for i in node.items):
             for item in node.items:
                 self._visit(item, ctx)
             for stmt in node.body:
@@ -911,28 +911,28 @@ class _Analyzer:
     def _check_isolated(self, node: ast.FunctionDef | ast.AsyncFunctionDef | ast.ClassDef) -> None:
         for decorator in node.decorator_list:
             called = decorator.func if isinstance(decorator, ast.Call) else decorator
-            if self.names.qualified_name(called) in NEO_ISOLATED_NAMES and node not in self.compute_nodes:
-                self._report("NEO2007", ERROR, decorator,
-                             f"@neo.isolated only applies to a compute def, and '{node.name}' is not one")
+            if self.names.qualified_name(called) in MOLTY_ISOLATED_NAMES and node not in self.compute_nodes:
+                self._report("MOL2007", ERROR, decorator,
+                             f"@molty.isolated only applies to a compute def, and '{node.name}' is not one")
 
-    def _is_neo_scope(self, expr: ast.expr) -> bool:
-        return isinstance(expr, ast.Call) and self.names.qualified_name(expr.func) in NEO_SCOPE_NAMES
+    def _is_molty_scope(self, expr: ast.expr) -> bool:
+        return isinstance(expr, ast.Call) and self.names.qualified_name(expr.func) in MOLTY_SCOPE_NAMES
 
     def _check_call(self, call: ast.Call, ctx: _Context) -> None:
         func = call.func
         if ctx.compute is not None and isinstance(func, ast.Name) and self._is_task(func):
-            self._report("NEO2001", ERROR, call,
+            self._report("MOL2001", ERROR, call,
                          f"compute '{ctx.compute.name}' calls task {self._shown(func)}; a worker process has no "
                          "event loop to run it (call compute from task instead)")
         qualified = self.names.qualified_name(func)
         owner = ctx.task if ctx.task is not None else ctx.compute
         if qualified == "threading.Thread" and owner is not None:
             kind = "task" if ctx.task is not None else "compute"
-            self._report("NEO2002", WARNING, call,
+            self._report("MOL2002", WARNING, call,
                          f"threading.Thread created inside {kind} '{owner.name}'; "
                          "use task for I/O and compute for CPU work instead of a raw thread")
         if qualified == "asyncio.create_task" and not ctx.in_scope:
-            self._report("NEO2003", WARNING, call,
+            self._report("MOL2003", WARNING, call,
                          "asyncio.create_task outside 'async with scope()'; nothing waits for the task, "
                          "so spawn it in a scope instead")
         self._check_coroutine_use(call, ctx)
@@ -961,7 +961,7 @@ class _Analyzer:
                 return self._coroutine_def(statement.value, hops + 1)
         return None
 
-    # NEO2006: calling a task or compute returns a coroutine, which only runs
+    # MOL2006: calling a task or compute returns a coroutine, which only runs
     # once something awaits it.  These parents keep the coroutine for later.
     _KEPT = (ast.Await, ast.Assign, ast.AnnAssign, ast.NamedExpr, ast.Return, ast.Yield, ast.YieldFrom, ast.Lambda)
     # A coroutine inside one of these goes wherever the container goes.
@@ -990,8 +990,8 @@ class _Analyzer:
         kind = found[0]
         name = self._shown(call.func)
         if ctx.compute is not None:
-            if kind == "compute":  # compute calling task is already NEO2001
-                self._report("NEO2006", WARNING, call,
+            if kind == "compute":  # compute calling task is already MOL2001
+                self._report("MOL2006", WARNING, call,
                              f"compute '{ctx.compute.name}' calls compute {name}, which returns a coroutine "
                              "that a worker process cannot await; call a plain function instead")
             return
@@ -1009,7 +1009,7 @@ class _Analyzer:
             problem = "the coroutine is thrown away, so it never runs"
         else:
             problem = "the coroutine is used as a value instead of being awaited"
-        self._report("NEO2006", WARNING, call,
+        self._report("MOL2006", WARNING, call,
                      f"{kind} {name} returns a coroutine; {problem} (await it, or pass it to s.spawn or asyncio.run)")
 
     def _runs_coroutines(self, func: ast.expr) -> bool:

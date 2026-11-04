@@ -1,10 +1,10 @@
-"""Step 3: val parameters and NEO1002, one test per row of the mutating-method table."""
+"""Step 3: val parameters and MOL1002, one test per row of the mutating-method table."""
 
 import unittest
 
-from helpers import NeoTestCase, compile_neo, load
+from helpers import MoltyTestCase, compile_molty, load
 
-from neo.compiler.rules import MUTATING_METHODS
+from molty.compiler.rules import MUTATING_METHODS
 
 # One entry per row of MUTATING_METHODS: the explicit call, plus the operator
 # spelling for the dunder rows.
@@ -36,7 +36,7 @@ EXAMPLES = {
 }
 
 
-class MutatingMethodTable(NeoTestCase):
+class MutatingMethodTable(MoltyTestCase):
     def test_every_row_has_a_test(self):
         self.assertEqual(set(EXAMPLES), set(MUTATING_METHODS))
 
@@ -45,7 +45,7 @@ def _row_test(statements):
     def test(self):
         for statement in statements:
             with self.subTest(statement):
-                self.assertError(f"def f(items: val list):\n    {statement}\n", "NEO1002")
+                self.assertError(f"def f(items: val list):\n    {statement}\n", "MOL1002")
 
     return test
 
@@ -54,9 +54,9 @@ for _method, _statements in EXAMPLES.items():
     setattr(MutatingMethodTable, f"test_row_{_method}", _row_test(_statements))
 
 
-class ValParameters(NeoTestCase):
+class ValParameters(MoltyTestCase):
     def test_rebinding_is_an_error(self):
-        self.assertError("def f(items: val list[int]):\n    items = []\n", "NEO1002")
+        self.assertError("def f(items: val list[int]):\n    items = []\n", "MOL1002")
 
     def test_reading_is_fine(self):
         self.assertClean(
@@ -70,8 +70,8 @@ class ValParameters(NeoTestCase):
         self.assertClean("def f(items: list[int]):\n    items.append(1)\n")
 
     def test_mutation_from_a_closure_is_caught(self):
-        self.assertError("def f(items: val list):\n    def g():\n        items.append(1)\n    g()\n", "NEO1002")
-        self.assertError("def f(items: val list):\n    def g():\n        nonlocal items\n        items = []\n", "NEO1002")
+        self.assertError("def f(items: val list):\n    def g():\n        items.append(1)\n    g()\n", "MOL1002")
+        self.assertError("def f(items: val list):\n    def g():\n        nonlocal items\n        items = []\n", "MOL1002")
 
     def test_a_shadowing_closure_is_fine(self):
         self.assertClean("def f(items: val list):\n    def g(items):\n        items.append(1)\n    return g\n")
@@ -79,11 +79,11 @@ class ValParameters(NeoTestCase):
     def test_any_parameter_kind(self):
         for params in ["*, items: val dict", "items: val dict = {}", "items: val dict, /", "x, items: val 'dict'"]:
             with self.subTest(params):
-                self.assertError(f"def f({params}):\n    items.update(a=1)\n", "NEO1002")
+                self.assertError(f"def f({params}):\n    items.update(a=1)\n", "MOL1002")
 
     def test_val_is_stripped_and_nothing_is_copied(self):
-        result = compile_neo("def same(items: val list[int], *, key: val str = 'k'):\n    return items\n")
-        self.assertIn("def same(items: neo.runtime.Sequence[int], *, key: str = 'k'):", result.code)
+        result = compile_molty("def same(items: val list[int], *, key: val str = 'k'):\n    return items\n")
+        self.assertIn("def same(items: molty.runtime.Sequence[int], *, key: str = 'k'):", result.code)
         mod = load("def same(items: val list[int]):\n    return items\n")
         mine = [1]
         self.assertIs(mod.same(mine), mine)
