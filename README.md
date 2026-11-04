@@ -143,7 +143,8 @@ var count = 0
 * Changing a frozen `val` in place, as in `PRICES.append(3)` or
   `CONFIG["port"] = 80`, is an error (MOL1005); it would fail at run time
   anyway. So is changing a frozen part of it, as in `CONFIG["db"]["host"] = "y"`,
-  and `ROUTES[key].append(x)` when every item of `ROUTES` is a frozen literal.
+  and `ROUTES[key].append(x)` when every item of `ROUTES` is a frozen literal,
+  and changing it through a plain alias (`p = PRICES` then `p.append(4)`).
   A value you build up step by step belongs in a `var`.
 * A `val` bound to any other object, such as `val cache = LRUCache()`, only
   promises not to be rebound. Its methods can be called as usual.
@@ -163,6 +164,8 @@ Rebinding a `val` parameter, or calling one of the built-in mutating methods
 of `list`, `dict` and `set` on it (`append`, `update`, `items[k] = v`, `+=`,
 ...), is an error. The full list is `MUTATING_METHODS` in
 `molty/compiler/rules.py`. Callers pass the object as usual; nothing is copied.
+Plain aliases are followed too: after `other = items`, `other.append(0)` is
+also MOL1002.
 
 Because the function promises not to change the argument, moltyc widens its
 annotation to the read-only type: `list[int]` becomes `Sequence[int]`,
@@ -325,8 +328,10 @@ unchanged, and `compute` stops checking picklability.
 
 ## Limits of this first version
 
-* There is no ownership model. Aliasing a `val` parameter (`other = items;
-  other.append(1)`) is not caught.
+* There is no ownership model. A plain alias (`other = items`, bound once)
+  is followed, but a value put in a container, passed to another function or
+  reached through an attribute is not, and neither is a name bound more than
+  once.
 * Tested on CPython 3.11, 3.12, 3.13 and 3.14. On 3.11, a `@molty.checked`
   task is checked when it is awaited rather than when it is called, because
   `inspect.markcoroutinefunction` only exists from 3.12.

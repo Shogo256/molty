@@ -135,6 +135,29 @@ class FrozenValChanges(MoltyTestCase):
             with self.subTest(source):
                 self.assertError(source, "MOL1005")
 
+    def test_changing_a_frozen_val_through_an_alias_is_an_error(self):
+        cases = {
+            "val PRICES = [1]\np = PRICES\np.append(2)\n": "val 'PRICES' (through its alias 'p')",
+            "val PRICES = [1]\ndef f():\n    local = PRICES\n    local[0] = 9\n": "through its alias 'local'",
+            "val CONFIG = {'db': {'h': 1}}\nc = CONFIG\nc['db']['h'] = 2\n": "(part of val 'CONFIG', through its alias 'c')",
+        }
+        for source, message in cases.items():
+            with self.subTest(source):
+                result = self.assertError(source, "MOL1005")
+                self.assertIn(message, result.errors[0].message)
+
+    def test_a_copy_of_a_frozen_val_can_change(self):
+        self.assertClean(
+            "val PRICES = [1]\n"
+            "q = list(PRICES)\n"
+            "q.append(2)\n"
+            "class Cache:\n"
+            "    def clear(self): pass\n"
+            "val cache = Cache()\n"
+            "c = cache\n"
+            "c.clear()\n"
+        )
+
     def test_an_ordinary_item_of_a_comprehension_can_change(self):
         self.assertClean("rows = [[1], [2]]\nval R = [row for row in rows]\nR[0].append(3)\n")
 

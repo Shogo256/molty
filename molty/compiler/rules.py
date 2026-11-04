@@ -593,6 +593,7 @@ class _Analyzer:
         }
         self.val_targets: set[Located] = set()
         self.frozen_vals: dict[Located, ast.expr] = {}  # val name -> the literal moltyc froze
+        self._binding_scopes: dict[object, Scope] | None = None  # binding node -> scope that owns it
         self.val_params: list[tuple[ast.arg, ast.FunctionDef | ast.AsyncFunctionDef]] = []
         self.task_nodes: set[object] = set()
         self.compute_nodes: list[ast.FunctionDef] = []
@@ -730,18 +731,21 @@ class _Analyzer:
                 if not bindings or not all(b.node in self.frozen_vals for b in bindings):
                     continue
                 values = [self.frozen_vals[b.node] for b in bindings]
-                for use in self.names.loads.get(name, []):
-                    if self.names.owner(name, self.names.load_scope[use]) is not owner:
-                        continue
-                    node, parts = self._frozen_part(use, values)
-                    how = self._mutation(node)
-                    if not how:
-                        continue
-                    kind = " or ".join(sorted({self._frozen_kind(part) or "" for part in parts}))
-                    where = f"val '{name}'" if node is use else f"'{ast.unparse(node)}' (part of val '{name}')"
-                    self._report("MOL1005", ERROR, use,
-                                 f"{where} was frozen to a {kind}, which cannot be changed by {how}; "
-                                 f"declare '{name}' with var if it has to change")
+                for alias, alias_scope in [(name, owner), *self._aliases(name, owner)]:
+                    through = "" if alias == name and alias_scope is owner else f", through its alias '{alias}'"
+                    for use in self._uses(alias, alias_scope):
+                        node, parts = self._frozen_part(use, values)
+                        how = self._mutation(node)
+                        if not how:
+                            continue
+                        kind = " or ".join(sorted({self._frozen_kind(part) or "" for part in parts}))
+                        if node is use:
+                            where = f"val '{name}'" + (f" (through its alias '{alias}')" if through else "")
+                        else:
+                            where = f"'{ast.unparse(node)}' (part of val '{name}'{through})"
+                        self._report("MOL1005", ERROR, use,
+                                     f"{where} was frozen to a {kind}, which cannot be changed by {how}; "
+                                     f"declare '{name}' with var if it has to change")
 
     def _frozen_part(self, use: ast.Name, values: list[ast.expr]) -> tuple[ast.expr, list[ast.expr]]:
         """Follow ``X["db"][key]`` through the literal as far as it is frozen too.
@@ -778,12 +782,54 @@ class _Analyzer:
                 else:
                     message = f"cannot rebind val parameter '{arg.arg}'"
                 self._report("MOL1002", ERROR, binding.node, message)
-            for use in self.names.loads.get(arg.arg, []):
-                if self.names.owner(arg.arg, self.names.load_scope[use]) is not scope:
+            for name, owner in [(arg.arg, scope), *self._aliases(arg.arg, scope)]:
+                through = "" if name == arg.arg and owner is scope else f" through its alias '{name}'"
+                for use in self._uses(name, owner):
+                    how = self._mutation(use)
+                    if how:
+                        self._report("MOL1002", ERROR, use, f"val parameter '{arg.arg}' is mutated{through} by {how}")
+
+    def _uses(self, name: str, owner: Scope) -> list[ast.Name]:
+        """Every load of ``name`` that refers to its binding in ``owner``."""
+        return [use for use in self.names.loads.get(name, []) if self.names.owner(name, self.names.load_scope[use]) is owner]
+
+    def _aliases(self, name: str, owner: Scope) -> list[tuple[str, Scope]]:
+        """Names that hold the very same value: ``other = items``, and aliases of those.
+
+        Only a name bound exactly once, to the value itself, counts.  A name
+        bound anywhere else too might hold something else by the time it is
+        used, and a copy such as ``list(items)`` is a different object, so
+        neither is followed: an alias never causes a false positive.
+        """
+        if self._binding_scopes is None:
+            self._binding_scopes = {
+                binding.node: scope
+                for scope in self.names.scopes
+                for bindings in scope.bindings.values()
+                for binding in bindings
+            }
+        found: list[tuple[str, Scope]] = []
+        seen = {(name, id(owner))}
+        queue = [(name, owner)]
+        while queue:
+            current, scope = queue.pop()
+            for use in self._uses(current, scope):
+                parent = self.parents.get(use)
+                target: ast.expr | None = None
+                if isinstance(parent, ast.Assign) and parent.value is use and len(parent.targets) == 1:
+                    target = parent.targets[0]
+                elif isinstance(parent, (ast.AnnAssign, ast.NamedExpr)) and parent.value is use:
+                    target = parent.target
+                if not isinstance(target, ast.Name):
                     continue
-                how = self._mutation(use)
-                if how:
-                    self._report("MOL1002", ERROR, use, f"val parameter '{arg.arg}' is mutated by {how}")
+                alias_scope = self._binding_scopes.get(target)
+                if alias_scope is None or len(alias_scope.bindings.get(target.id, [])) != 1:
+                    continue
+                if (target.id, id(alias_scope)) not in seen:
+                    seen.add((target.id, id(alias_scope)))
+                    found.append((target.id, alias_scope))
+                    queue.append((target.id, alias_scope))
+        return found
 
     def _mutation(self, use: ast.expr) -> str | None:
         parent = self.parents.get(use)

@@ -73,6 +73,33 @@ class ValParameters(MoltyTestCase):
         self.assertError("def f(items: val list):\n    def g():\n        items.append(1)\n    g()\n", "MOL1002")
         self.assertError("def f(items: val list):\n    def g():\n        nonlocal items\n        items = []\n", "MOL1002")
 
+    def test_mutation_through_an_alias_is_caught(self):
+        cases = {
+            "other = items\n    other.append(1)": "through its alias 'other' by .append()",
+            "a = items\n    b = a\n    b[0] = 1": "through its alias 'b' by item assignment",
+            "other: list = items\n    other.pop()": "through its alias 'other' by .pop()",
+            "if (w := items):\n        w.clear()": "through its alias 'w' by .clear()",
+            "other = items\n    def later():\n        other.sort()": "through its alias 'other' by .sort()",
+        }
+        for body, message in cases.items():
+            with self.subTest(body):
+                result = self.assertError(f"def f(items: val list):\n    {body}\n", "MOL1002")
+                self.assertIn(message, result.errors[0].message)
+
+    def test_a_copy_or_a_rebound_name_is_not_an_alias(self):
+        self.assertClean(
+            "def f(items: val list[int]) -> int:\n"
+            "    copy = items.copy()\n"
+            "    copy.append(1)\n"
+            "    fresh = list(items)\n"
+            "    fresh.append(1)\n"
+            "    changed = items\n"
+            "    changed = []\n"
+            "    changed.append(1)\n"
+            "    view = items\n"
+            "    return view.count(1)\n"
+        )
+
     def test_a_shadowing_closure_is_fine(self):
         self.assertClean("def f(items: val list):\n    def g(items):\n        items.append(1)\n    return g\n")
 
