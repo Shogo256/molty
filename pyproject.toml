@@ -1,0 +1,29 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "python-neo"
+version = "0.1.0"
+description = "A strict superset of Python that turns common Python traps into compile-time errors."
+readme = "README.md"
+requires-python = ">=3.14"
+license = "Apache-2.0"
+license-files = ["LICENSE"]
+dependencies = []
+keywords = ["python", "transpiler", "immutability", "concurrency"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.14",
+    "Topic :: Software Development :: Compilers",
+]
+
+[project.scripts]
+neoc = "neo.compiler.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["neo", "neo.*"]
+
+[tool.setuptools.package-data]
+neo = ["py.typed"]
