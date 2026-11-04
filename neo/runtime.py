@@ -12,6 +12,7 @@ import asyncio
 import functools
 import importlib
 import inspect
+import multiprocessing
 import os
 import sys
 import threading
@@ -248,12 +249,18 @@ _pool: ProcessPoolExecutor | None = None
 _pool_lock = threading.Lock()
 
 
+def _start_method() -> str:
+    # forkserver (the default on Linux since 3.14) wherever it exists, so compute
+    # behaves the same on every Python version: workers import functions by name.
+    return "forkserver" if "forkserver" in multiprocessing.get_all_start_methods() else "spawn"
+
+
 def compute_pool() -> ProcessPoolExecutor:
     """The process pool shared by every compute function, created on first use."""
     global _pool
     with _pool_lock:
         if _pool is None:
-            _pool = ProcessPoolExecutor()
+            _pool = ProcessPoolExecutor(mp_context=multiprocessing.get_context(_start_method()))
         return _pool
 
 

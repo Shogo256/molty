@@ -5,6 +5,7 @@ Codes:
     NEO1001  a ``val`` name is rebound
     NEO1002  a ``val`` parameter is rebound, or mutated through a built-in mutating method
     NEO1003  a malformed ``val``/``var`` declaration
+    NEO1004  (warning) a mutable default argument, shared by every call
     NEO2001  a ``compute`` function calls a ``task``
     NEO2002  (warning) ``threading.Thread`` created inside a ``task`` or ``compute``
     NEO2003  (warning) ``asyncio.create_task`` called outside ``scope()``
@@ -56,6 +57,13 @@ MUTATING_METHODS: dict[str, tuple[str, ...]] = {
 
 NEO_SCOPE_NAMES = frozenset({"scope", "neo.scope", "neo.runtime.scope"})
 
+# Defaults that build a new mutable object; Python evaluates them only once.
+MUTABLE_FACTORIES = frozenset({
+    "list", "dict", "set", "bytearray",
+    "collections.defaultdict", "collections.OrderedDict", "collections.Counter", "collections.deque",
+})
+_MUTABLE_DISPLAYS = (ast.List, ast.Dict, ast.Set, ast.ListComp, ast.DictComp, ast.SetComp)
+
 
 @dataclass(frozen=True)
 class Diagnostic:
@@ -91,6 +99,14 @@ class Scope:
 
     def bind(self, binding: Binding) -> None:
         self.bindings.setdefault(binding.name, []).append(binding)
+
+
+def defaults(args: ast.arguments) -> list[tuple[ast.arg, ast.expr]]:
+    """Each parameter that has a default, paired with it."""
+    positional = [*args.posonlyargs, *args.args]
+    pairs = list(zip(positional[len(positional) - len(args.defaults) :], args.defaults))
+    pairs += [(a, d) for a, d in zip(args.kwonlyargs, args.kw_defaults) if d is not None]
+    return pairs
 
 
 def all_args(args: ast.arguments) -> list[ast.arg]:
@@ -440,6 +456,13 @@ class ComputeInfo:
 
 
 @dataclass
+class MutableDefault:
+    func: ast.FunctionDef | ast.AsyncFunctionDef
+    arg: ast.arg
+    default: ast.expr
+
+
+@dataclass
 class Analysis:
     names: Names
     diagnostics: list[Diagnostic] = field(default_factory=list)
@@ -447,6 +470,7 @@ class Analysis:
     tasks: list[ast.AsyncFunctionDef] = field(default_factory=list)
     computes: list[ComputeInfo] = field(default_factory=list)
     scope_names: list[ast.Name] = field(default_factory=list)  # bare ``scope`` -> neo.runtime.scope
+    mutable_defaults: list[MutableDefault] = field(default_factory=list)  # to rewrite (--rewrite-defaults)
 
     @property
     def failed(self) -> bool:
@@ -494,9 +518,10 @@ def _local_nodes(body: list[ast.stmt]):
 
 
 class _Analyzer:
-    def __init__(self, tree: ast.Module, prepared: Prepared) -> None:
+    def __init__(self, tree: ast.Module, prepared: Prepared, rewrite_defaults: bool) -> None:
         self.tree = tree
         self.prepared = prepared
+        self.rewrite_defaults = rewrite_defaults
         self.names = Names(tree)
         self.result = Analysis(self.names)
         self.parents = {child: parent for parent in ast.walk(tree) for child in ast.iter_child_nodes(parent)}
@@ -509,6 +534,7 @@ class _Analyzer:
         self._match_markers()
         self._check_val_names()
         self._check_val_params()
+        self._check_mutable_defaults()
         self._check_computes()
         self._visit(self.tree, _Context(None, None, False))
         self._collect_scope_names()
@@ -615,6 +641,36 @@ class _Analyzer:
                 return "item deletion (__delitem__)"
         return None
 
+    # NEO1004 ---------------------------------------------------------------------
+
+    def _check_mutable_defaults(self) -> None:
+        cache_lines = self.prepared.cache_lines
+        for func in ast.walk(self.tree):
+            if not isinstance(func, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)):
+                continue
+            for arg, default in defaults(func.args):
+                if not self._is_mutable_default(default):
+                    continue
+                if cache_lines.intersection(range(arg.lineno, default.end_lineno + 1)):
+                    continue  # ``# neo: cache``: the sharing is intended
+                if self.rewrite_defaults and not isinstance(func, ast.Lambda):
+                    self.result.mutable_defaults.append(MutableDefault(func, arg, default))
+                    continue
+                shown = ast.unparse(default)
+                if len(shown) > 24:
+                    shown = shown[:21] + "..."
+                if isinstance(func, ast.Lambda):
+                    hint = "mark it '# neo: cache' if that is intended; --rewrite-defaults cannot rewrite a lambda"
+                else:
+                    hint = "mark it '# neo: cache' if that is intended, or compile with --rewrite-defaults"
+                self._report("NEO1004", WARNING, default,
+                             f"default {shown} of '{arg.arg}' is created once and shared by every call; {hint}")
+
+    def _is_mutable_default(self, node: ast.expr) -> bool:
+        if isinstance(node, _MUTABLE_DISPLAYS):
+            return True
+        return isinstance(node, ast.Call) and self.names.qualified_name(node.func) in MUTABLE_FACTORIES
+
     # NEO2004, NEO2005 ------------------------------------------------------------
 
     def _check_computes(self) -> None:
@@ -697,5 +753,5 @@ class _Analyzer:
                 self.result.scope_names.append(name)
 
 
-def analyze(tree: ast.Module, prepared: Prepared) -> Analysis:
-    return _Analyzer(tree, prepared).run()
+def analyze(tree: ast.Module, prepared: Prepared, rewrite_defaults: bool = False) -> Analysis:
+    return _Analyzer(tree, prepared, rewrite_defaults).run()

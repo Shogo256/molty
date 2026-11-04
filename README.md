@@ -11,22 +11,35 @@ generated file.
 
 ## The trap, side by side
 
-The same ten lines, run as plain Python and compiled by neoc:
+The same file, run as plain Python and compiled by neoc:
 
 ```text
-# plain Python                               # Python Neo (app.neo.py)
-def add(item, items: list = []):             def add(item, items: list = []):
-    items.append(item)                           items.append(item)
-    return items                                 return items
+# plain Python                            # Python Neo
+def add(item, items: list = []):          def add(item, items: list = []):
+    items.append(item)                        items.append(item)
+    return items                              return items
 
-print(add(1))  # [1]                         print(add(1))  # [1]
-print(add(2))  # [1, 2]  <- same list!       print(add(2))  # [2]
-print(add(3))  # [1, 2, 3]                   print(add(3))  # [3]
-
-# one list, created when `def` ran           # a fresh list on every call
+print(add(1))  # [1]                      $ neoc app.neo.py
+print(add(2))  # [1, 2]  <- same list     app.neo.py:1:29: warning NEO1004:
+print(add(3))  # [1, 2, 3]                  default [] of 'items' is created
+                                            once and shared by every call
+# nothing tells you                       # neoc tells you before it runs
 ```
 
-What neoc writes for the Neo side:
+neoc does not change what the code means. The `.py` it writes behaves exactly
+like the source, and the warning tells you about the trap. There are two ways
+to act on it:
+
+```python
+def lookup(key, _cache={}):  # neo: cache
+    ...                      # the sharing is on purpose: no warning
+```
+
+```bash
+neoc --rewrite-defaults app.neo.py   # neoc gives every call a fresh list
+```
+
+With `--rewrite-defaults`, neoc writes:
 
 ```python
 def add(item, items: list | None = None):
@@ -34,6 +47,18 @@ def add(item, items: list | None = None):
         items = []
     items.append(item)
     return items
+```
+
+## A superset, checked
+
+Every `.py` file in the standard library compiles under neoc without errors.
+Each one comes out byte for byte the same, apart from the one-line
+generated-file header. We checked 628 files on CPython 3.14 (Ubuntu), and 633,
+686 and 734 files on 3.13, 3.12 and 3.11 (python-build-standalone). To check
+it on your own Python:
+
+```bash
+NEO_STDLIB=1 python -m unittest discover -s tests -p test_stdlib_superset.py
 ```
 
 ## Install and run
@@ -49,6 +74,7 @@ neoc app.neo.py              # writes app.py next to it
 neoc src/                    # every *.neo.py under src/
 neoc app.neo.py -o -         # print to stdout
 neoc app.neo.py --explain    # list every rewrite neoc made
+neoc app.neo.py --rewrite-defaults   # fix mutable defaults instead of warning
 ```
 
 `neoc` exits with 1 if any file has errors. Warnings are printed, but the
@@ -88,10 +114,16 @@ of `list`, `dict` and `set` on it (`append`, `update`, `items[k] = v`, `+=`,
 
 ### Mutable default arguments
 
-`list`, `dict` and `set` literals, and calls such as `list()` or
-`collections.defaultdict(...)`, used as defaults are rewritten to a `None`
-default plus a check in the body, as shown above. This is recorded, not
-warned about: `neoc --explain` lists each rewrite.
+A `list`, `dict` or `set` literal, or a call such as `list()` or
+`collections.defaultdict(...)`, used as a default is a NEO1004 warning. The
+code is left alone.
+
+* A `# neo: cache` comment on the parameter's line marks the sharing as
+  intended. The warning goes away, and the parameter is never rewritten.
+* `neoc --rewrite-defaults` rewrites each unmarked default to a `None`
+  default plus a check in the body, as shown above. `--explain` lists every
+  rewrite. Defaults of a `lambda` cannot be rewritten, so they keep the
+  warning.
 
 ### `task`, `compute` and `scope`
 
@@ -155,6 +187,7 @@ unchanged, and `compute` stops checking picklability.
 | NEO1001 | error   | a `val` is rebound                                           |
 | NEO1002 | error   | a `val` parameter is rebound or mutated                      |
 | NEO1003 | error   | malformed `val`/`var` declaration (`val x: int` with no value, `val a.b = 1`, ...) |
+| NEO1004 | warning | a mutable default argument, shared by every call             |
 | NEO2001 | error   | a `compute` calls a `task`                                   |
 | NEO2002 | warning | `threading.Thread` inside a `task` or `compute`              |
 | NEO2003 | warning | `asyncio.create_task` outside `scope()`                      |
@@ -167,10 +200,9 @@ unchanged, and `compute` stops checking picklability.
   is a NEO1001.
 * There is no ownership model. Aliasing a `val` parameter (`other = items;
   other.append(1)`) is not caught.
-* The default-argument rewrite also hits defaults that are shared on purpose,
-  such as `def lookup(key, _cache={})`. Such a function loses its cache under
-  Neo; use `functools.cache` or a module-level dict instead.
-* Requires CPython 3.14, the only version tested so far.
+* Tested on CPython 3.11, 3.12, 3.13 and 3.14. On 3.11, a `@neo.checked`
+  task is checked when it is awaited rather than when it is called, because
+  `inspect.markcoroutinefunction` only exists from 3.12.
 
 ## Development
 

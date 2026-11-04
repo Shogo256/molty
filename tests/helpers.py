@@ -24,17 +24,17 @@ atexit.register(shutil.rmtree, MODULE_DIR, ignore_errors=True)
 _names = itertools.count()
 
 
-def compile_neo(source: str) -> CompileResult:
-    return compile_source(textwrap.dedent(source), FILENAME)
+def compile_neo(source: str, **options) -> CompileResult:
+    return compile_source(textwrap.dedent(source), FILENAME, **options)
 
 
 def describe(result: CompileResult) -> str:
     return "\n".join(d.format(FILENAME) for d in result.diagnostics) or "(no diagnostics)"
 
 
-def load(source: str):
+def load(source: str, **options):
     """Compile ``source`` and import it as a fresh module."""
-    result = compile_neo(source)
+    result = compile_neo(source, **options)
     if not result.ok:
         raise AssertionError("does not compile:\n" + describe(result))
     name = f"neo_test_{os.getpid()}_{next(_names)}"
@@ -45,14 +45,14 @@ def load(source: str):
 
 
 class NeoTestCase(unittest.TestCase):
-    def assertCompiles(self, source: str) -> CompileResult:
-        result = compile_neo(source)
+    def assertCompiles(self, source: str, **options) -> CompileResult:
+        result = compile_neo(source, **options)
         self.assertTrue(result.ok, describe(result))
         return result
 
-    def assertClean(self, source: str) -> CompileResult:
+    def assertClean(self, source: str, **options) -> CompileResult:
         """Compiles with no errors and no warnings."""
-        result = self.assertCompiles(source)
+        result = self.assertCompiles(source, **options)
         self.assertEqual(result.diagnostics, [], describe(result))
         return result
 
@@ -62,8 +62,8 @@ class NeoTestCase(unittest.TestCase):
         self.assertIn(code, [d.code for d in result.errors], describe(result))
         return result
 
-    def assertWarning(self, source: str, code: str) -> CompileResult:
-        result = self.assertCompiles(source)
+    def assertWarning(self, source: str, code: str, **options) -> CompileResult:
+        result = self.assertCompiles(source, **options)
         self.assertEqual([d.code for d in result.warnings], [code], describe(result))
         return result
 

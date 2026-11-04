@@ -12,17 +12,12 @@ import os
 import re
 from dataclasses import dataclass
 
-from neo.compiler.rules import Analysis, ComputeInfo
+from neo.compiler.rules import Analysis, ComputeInfo, MutableDefault
 from neo.compiler.tokens import Prepared, split_lines
 
 MAPPING_PROXY = "neo.runtime.MappingProxyType"
 MAPPING = "neo.runtime.Mapping"
 
-# Defaults that build a new mutable object; Python evaluates them only once.
-_MUTABLE_FACTORIES = frozenset({
-    "list", "dict", "set", "bytearray",
-    "collections.defaultdict", "collections.OrderedDict", "collections.Counter", "collections.deque",
-})
 _CODING = re.compile(r"^[ \t\f]*#.*?coding[:=]")
 
 # Edits at the same offset are applied in this order.
@@ -105,9 +100,11 @@ class _Emitter:
     def run(self) -> tuple[str, list[Explanation]]:
         for decl in self.analysis.val_decls:
             self._freeze_declaration(decl)
-        for node in ast.walk(self.tree):
-            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
-                self._rewrite_mutable_defaults(node)
+        by_function: dict[ast.AST, list[MutableDefault]] = {}
+        for item in self.analysis.mutable_defaults:  # only with --rewrite-defaults
+            by_function.setdefault(item.func, []).append(item)
+        for items in by_function.values():
+            self._rewrite_mutable_defaults(items)
         for task in self.analysis.tasks:
             self._explain(task, f"task '{task.name}' compiles to a coroutine (async def)")
         for info in self.analysis.computes:
@@ -271,28 +268,17 @@ class _Emitter:
 
     # mutable default arguments ------------------------------------------------------
 
-    def _rewrite_mutable_defaults(self, func: ast.FunctionDef | ast.AsyncFunctionDef) -> None:
-        args = func.args
-        positional = [*args.posonlyargs, *args.args]
-        pairs = list(zip(positional[len(positional) - len(args.defaults) :], args.defaults))
-        pairs += [(a, d) for a, d in zip(args.kwonlyargs, args.kw_defaults) if d is not None]
+    def _rewrite_mutable_defaults(self, items: list[MutableDefault]) -> None:
         checks = []
-        for arg, default in pairs:
-            if not self._is_mutable_default(default):
-                continue
+        for item in items:
+            arg, default = item.arg, item.default
             expr = self.text.segment(default)
             self._replace(default, "None")
             if arg.annotation is not None and not self._allows_none(arg.annotation):
                 self._optional(arg.annotation)
             checks.append((arg.arg, expr))
             self._explain(arg, f"mutable default of '{arg.arg}' ({expr}) is now created on every call")
-        if checks:
-            self._insert_default_checks(func, checks)
-
-    def _is_mutable_default(self, node: ast.expr) -> bool:
-        if isinstance(node, (ast.List, ast.Dict, ast.Set, ast.ListComp, ast.DictComp, ast.SetComp)):
-            return True
-        return isinstance(node, ast.Call) and self.names.qualified_name(node.func) in _MUTABLE_FACTORIES
+        self._insert_default_checks(items[0].func, checks)
 
     def _allows_none(self, node: ast.expr) -> bool:
         if isinstance(node, ast.Constant):

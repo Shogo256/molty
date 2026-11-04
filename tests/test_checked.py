@@ -14,6 +14,7 @@ from unittest import mock
 
 from helpers import NeoTestCase, compile_neo, load
 
+import neo
 from neo.runtime import CheckError
 
 SOURCE = """
@@ -83,6 +84,11 @@ class Checked(NeoTestCase):
         self.assertTrue(inspect.iscoroutinefunction(self.mod.fetch))
         self.assertEqual(asyncio.run(self.mod.fetch("u")), "u")
         with self.assertRaises(CheckError):
+            asyncio.run(self.mod.fetch(1))
+
+    @unittest.skipIf(sys.version_info < (3, 12), "without markcoroutinefunction the check runs when awaited")
+    def test_a_checked_task_is_checked_when_called(self):
+        with self.assertRaises(CheckError):
             self.mod.fetch(1)
 
     def test_functions_without_the_decorator_are_not_checked(self):
@@ -108,7 +114,8 @@ class ChecksOff(NeoTestCase):
         self.addCleanup(shutil.rmtree, directory)
         script = Path(directory) / "app.py"
         script.write_text(compile_neo(textwrap.dedent(SOURCE) + "print(count('abc'))\n").code)
-        env = dict(os.environ, NEO_CHECKS="0")
+        package_root = str(Path(neo.__file__).resolve().parent.parent)  # works without installing neo
+        env = dict(os.environ, NEO_CHECKS="0", PYTHONPATH=package_root)
         done = subprocess.run([sys.executable, str(script)], env=env, capture_output=True, text=True)
         self.assertEqual(done.stdout, "3\n", done.stderr)
         env["NEO_CHECKS"] = "1"

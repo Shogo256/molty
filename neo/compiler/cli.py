@@ -54,6 +54,11 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("sources", nargs="+", metavar="SOURCE", help=f"{SUFFIX} files or directories containing them")
     parser.add_argument("-o", "--output", help="output file for a single source; '-' writes to stdout")
     parser.add_argument("--explain", action="store_true", help="list every rewrite neoc made")
+    parser.add_argument(
+        "--rewrite-defaults",
+        action="store_true",
+        help="give mutable default arguments a fresh object per call instead of warning (NEO1004)",
+    )
     parser.add_argument("--version", action="version", version=f"neoc {neo.__version__}")
     args = parser.parse_args(argv)
 
@@ -66,7 +71,7 @@ def main(argv: list[str] | None = None) -> int:
         raw = path.read_bytes()
         encoding, _ = tokenize.detect_encoding(io.BytesIO(raw).readline)
         source = raw.decode(encoding)
-        result = compile_source(source, str(path))
+        result = compile_source(source, str(path), rewrite_defaults=args.rewrite_defaults)
         to_stdout = args.output == "-"
         _report(result, path, source, args.explain, sys.stderr if to_stdout else sys.stdout)
         if not result.ok:

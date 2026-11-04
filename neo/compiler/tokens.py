@@ -6,6 +6,8 @@ Only these forms are recognized:
 * ``NAME: val TYPE`` inside the parameter list of a ``def``
 * ``task def`` (becomes ``async def``) and ``compute def`` (becomes ``def``)
 
+It also notes which lines carry a ``# neo: cache`` comment.
+
 Each of them is a pair of adjacent names (or a name followed by ``def``),
 which valid Python never contains, so every valid Python file passes through
 this stage unchanged.  Edits never add or remove lines; they only shift
@@ -17,6 +19,7 @@ from __future__ import annotations
 
 import io
 import keyword
+import re
 import tokenize
 from dataclasses import dataclass, field
 
@@ -28,6 +31,7 @@ _BLOCK_HEADS = frozenset(
 )
 _SKIPPED = frozenset({tokenize.COMMENT, tokenize.NL, tokenize.ENCODING})
 _LINE_BREAKS = frozenset({tokenize.NEWLINE, tokenize.INDENT, tokenize.DEDENT, tokenize.ENDMARKER})
+_CACHE_COMMENT = re.compile(r"#\s*neo:\s*cache\b")
 
 
 def split_lines(source: str) -> list[str]:
@@ -92,6 +96,7 @@ class Prepared:
     val_params: set[tuple[int, int]] = field(default_factory=set)  # the ast.arg node
     tasks: set[tuple[int, int]] = field(default_factory=set)  # the AsyncFunctionDef node
     computes: set[tuple[int, int]] = field(default_factory=set)  # the FunctionDef node
+    cache_lines: set[int] = field(default_factory=set)  # lines with a ``# neo: cache`` comment
 
     def __post_init__(self) -> None:
         self._original_lines = split_lines(self.original)
@@ -132,7 +137,9 @@ def prepare(source: str) -> Prepared:
     """Rewrite Neo-only syntax to plain Python.  Raises ``SyntaxError`` or
     ``tokenize.TokenError`` when the source cannot even be tokenized."""
     readline = io.StringIO(source, newline="").readline
-    toks = [t for t in tokenize.generate_tokens(readline) if t.type not in _SKIPPED]
+    every = list(tokenize.generate_tokens(readline))
+    toks = [t for t in every if t.type not in _SKIPPED]
+    cache_lines = {t.start[0] for t in every if t.type == tokenize.COMMENT and _CACHE_COMMENT.match(t.string)}
 
     edits: list[_Edit] = []
     markers: list[tuple[str, int, int]] = []  # (kind, line, original character column)
@@ -202,17 +209,17 @@ def prepare(source: str) -> Prepared:
                     markers.append(("val_param", *param.start))
                 param = None
 
-    return _apply(source, edits, markers)
+    return _apply(source, edits, markers, cache_lines)
 
 
-def _apply(source: str, edits: list[_Edit], markers: list[tuple[str, int, int]]) -> Prepared:
+def _apply(source: str, edits: list[_Edit], markers: list[tuple[str, int, int]], cache_lines: set[int]) -> Prepared:
     lines = split_lines(source)
     for edit in sorted(edits, key=lambda e: (e.line, e.start), reverse=True):
         text = lines[edit.line - 1]
         lines[edit.line - 1] = text[: edit.start] + edit.text + text[edit.end :]
 
     positions = PositionMap(edits)
-    prepared = Prepared(original=source, source="".join(lines), positions=positions)
+    prepared = Prepared(original=source, source="".join(lines), positions=positions, cache_lines=cache_lines)
     buckets = {
         "val": prepared.val_decls,
         "var": prepared.var_decls,

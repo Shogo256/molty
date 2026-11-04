@@ -88,9 +88,16 @@ class Cli(unittest.TestCase):
         self.assertIn("bad.neo.py:2:1: error NEO1001", err)
         self.assertFalse((self.dir / "bad.py").exists())
 
+    def test_a_warning_still_writes_the_file(self):
+        source = self.write("app.neo.py", "def f(xs=[]):\n    return xs\n")
+        code, _, err = self.run_main(str(source))
+        self.assertEqual(code, 0)
+        self.assertIn("app.neo.py:1:10: warning NEO1004", err)
+        self.assertTrue((self.dir / "app.py").read_text().endswith("def f(xs=[]):\n    return xs\n"))
+
     def test_stdout_and_explain(self):
         source = self.write("app.neo.py", "def f(xs=[]):\n    return xs\n")
-        code, out, err = self.run_main(str(source), "-o", "-", "--explain")
+        code, out, err = self.run_main(str(source), "-o", "-", "--explain", "--rewrite-defaults")
         self.assertEqual(code, 0)
         self.assertIn("if xs is None:", out)
         self.assertIn("explain: mutable default of 'xs' ([]) is now created on every call", err)

@@ -130,24 +130,75 @@ class Freezing(NeoTestCase):
         self.assertEqual([e.message for e in result.explanations], ["val cfg: dict -> MappingProxyType"])
 
 
+SHARED = "def add(x, items: list = []):\n    items.append(x)\n    return items\n"
+WARNING = (
+    "default [] of 'items' is created once and shared by every call; "
+    "mark it '# neo: cache' if that is intended, or compile with --rewrite-defaults"
+)
+
+
 class MutableDefaults(NeoTestCase):
+    """By default neoc only warns, so valid Python keeps its meaning."""
+
+    def test_a_mutable_default_warns_and_is_left_alone(self):
+        result = self.assertWarning(SHARED, "NEO1004")
+        warning = result.warnings[0]
+        self.assertEqual((warning.line, warning.col, warning.message), (1, 25, WARNING))
+        self.assertEqual(result.code, HEADER + SHARED)
+        self.assertEqual(result.explanations, [])
+        mod = load(SHARED)
+        self.assertEqual(mod.add(1), [1])
+        self.assertEqual(mod.add(2), [1, 2])  # Python's meaning, unchanged
+
+    def test_an_immutable_default_is_quiet(self):
+        source = "def f(items: tuple = (), n: int = 0, s=frozenset()):\n    return items\n"
+        self.assertEqual(self.assertClean(source).code, HEADER + source)
+
+    def test_every_mutable_form_warns(self):
+        forms = [
+            "[]", "{}", "{1}", "[i for i in range(3)]", "{i: i for i in range(3)}", "{i for i in ()}",
+            "list()", "dict(a=1)", "set()", "bytearray()", "collections.defaultdict(list)", "collections.deque()",
+        ]
+        for form in forms:
+            with self.subTest(form):
+                self.assertWarning(f"import collections\ndef f(x={form}):\n    return x\n", "NEO1004")
+        self.assertWarning("def f(*, x=[]):\n    return x\n", "NEO1004")
+        self.assertWarning("f = lambda x=[]: x\n", "NEO1004")
+
+    def test_a_shadowed_builtin_is_not_mutable(self):
+        self.assertClean("def list():\n    return ()\ndef f(x=list()):\n    return x\n")
+
+    def test_neo_cache_marks_the_sharing_as_intended(self):
+        self.assertClean("def lookup(key, _cache={}):  # neo: cache\n    return _cache.setdefault(key, len(_cache))\n")
+        self.assertClean("def lookup(\n    key,\n    _cache={},  # neo: cache\n):\n    return _cache\n")
+
+    def test_neo_cache_on_another_line_does_not_count(self):
+        self.assertWarning("# neo: cache\ndef lookup(key, _cache={}):\n    return _cache\n", "NEO1004")
+        self.assertWarning("def lookup(  # neo: cache\n    key,\n    _cache={},\n):\n    return _cache\n", "NEO1004")
+
+
+class RewriteDefaults(NeoTestCase):
+    """neoc --rewrite-defaults: a fresh object per call, recorded for --explain."""
+
     def test_a_default_list_is_fresh_on_every_call(self):
-        mod = load("def add(x, items: list = []):\n    items.append(x)\n    return items\n")
+        mod = load(SHARED, rewrite_defaults=True)
         self.assertEqual(mod.add(1), [1])
         self.assertEqual(mod.add(2), [2])
 
-    def test_an_immutable_default_is_untouched(self):
-        source = "def f(items: tuple = ()):\n    return items\n"
-        result = self.assertClean(source)
-        self.assertEqual(result.code, HEADER + source)
-        self.assertEqual(result.explanations, [])
-
     def test_the_rewrite_is_explained_not_warned(self):
-        result = self.assertClean("def f(items: list = []):\n    return items\n")
+        result = self.assertClean("def f(items: list = []):\n    return items\n", rewrite_defaults=True)
         self.assertEqual(
             [e.message for e in result.explanations], ["mutable default of 'items' ([]) is now created on every call"]
         )
         self.assertIn("def f(items: list | None = None):", result.code)
+
+    def test_neo_cache_is_still_left_alone(self):
+        source = "def lookup(key, _cache={}):  # neo: cache\n    return _cache\n"
+        self.assertEqual(self.assertClean(source, rewrite_defaults=True).code, HEADER + source)
+
+    def test_a_lambda_cannot_be_rewritten(self):
+        result = self.assertWarning("f = lambda x=[]: x\n", "NEO1004", rewrite_defaults=True)
+        self.assertIn("--rewrite-defaults cannot rewrite a lambda", result.warnings[0].message)
 
     def test_every_shape_of_function(self):
         mod = load(
@@ -165,7 +216,8 @@ class MutableDefaults(NeoTestCase):
                 def m(self, seen: "list[int]" = []):
                     seen.append(1)
                     return seen
-            '''
+            ''',
+            rewrite_defaults=True,
         )
         self.assertEqual(mod.a(), {"k": 1})
         self.assertEqual(mod.a(), {"k": 1})
@@ -179,7 +231,7 @@ class MutableDefaults(NeoTestCase):
         self.assertEqual(mod.K().m(), [1])
 
     def test_passing_a_value_still_works(self):
-        mod = load("def add(x, items=[]):\n    items.append(x)\n    return items\n")
+        mod = load("def add(x, items=[]):\n    items.append(x)\n    return items\n", rewrite_defaults=True)
         mine = [0]
         self.assertIs(mod.add(1, mine), mine)
         self.assertEqual(mine, [0, 1])

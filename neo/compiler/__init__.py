@@ -35,7 +35,9 @@ class CompileResult:
         return [d for d in self.diagnostics if d.severity == WARNING]
 
 
-def compile_source(source: str, filename: str = "<neo>") -> CompileResult:
+def compile_source(source: str, filename: str = "<neo>", *, rewrite_defaults: bool = False) -> CompileResult:
+    """Compile Neo source to Python.  With ``rewrite_defaults`` a mutable default
+    argument gets a fresh object per call instead of a NEO1004 warning."""
     try:
         prepared = tokens.prepare(source)
     except (SyntaxError, tokenize.TokenError) as exc:
@@ -50,7 +52,7 @@ def compile_source(source: str, filename: str = "<neo>") -> CompileResult:
     except SyntaxError as exc:
         return CompileResult(None, [_syntax_error(exc, prepared, utf8=True)])
 
-    analysis = rules.analyze(tree, prepared)
+    analysis = rules.analyze(tree, prepared, rewrite_defaults)
     if analysis.failed:
         return CompileResult(None, analysis.diagnostics)
     code, explanations = emit.emit(tree, prepared, analysis, filename)
