@@ -541,10 +541,15 @@ def _literal_items(container: ast.expr, key: ast.expr) -> list[ast.expr] | None:
     """The items ``container[key]`` can be, when the literal tells; else None.
 
     A constant key gives the one matching item; any other key (but a slice)
-    gives every item.
+    gives every item.  Every item of a comprehension comes from its one
+    expression, whatever the key.
     """
     if isinstance(key, ast.Slice):
         return None
+    if isinstance(container, ast.ListComp):
+        return [container.elt]
+    if isinstance(container, ast.DictComp):
+        return [container.value]
     if isinstance(container, ast.Dict):
         if any(k is None for k in container.keys):  # ``**other`` hides the keys
             return None

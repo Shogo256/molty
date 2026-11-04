@@ -127,6 +127,17 @@ class FrozenValChanges(MoltyTestCase):
             with self.subTest(source):
                 self.assertError(source, "MOL1005")
 
+    def test_an_item_of_a_frozen_comprehension_is_frozen_too(self):
+        for source in [
+            "val ROWS = [list(range(2)) for _ in range(2)]\nROWS[0][1] = 9\n",
+            "val M = {k: [k] for k in 'ab'}\nM['a'].append('x')\n",
+        ]:
+            with self.subTest(source):
+                self.assertError(source, "MOL1005")
+
+    def test_an_ordinary_item_of_a_comprehension_can_change(self):
+        self.assertClean("rows = [[1], [2]]\nval R = [row for row in rows]\nR[0].append(3)\n")
+
     def test_any_key_into_a_literal_with_an_ordinary_item_is_fine(self):
         self.assertClean("val MIXED = {'db': {'h': 1}, 'n': 3}\nkey = 'db'\nMIXED[key]['h'] = 2\n")
 
