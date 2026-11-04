@@ -14,6 +14,31 @@ from neo.compiler import CompileResult, compile_source
 
 SUFFIX = ".neo.py"
 
+# Shown by ``neoc --version`` on a terminal.
+LOGO = r"""
+ _   _ _____ ___
+| \ | | ____/ _ \
+|  \| |  _|| | | |
+| |\  | |__| |_| |
+|_| \_|_____\___/
+ ~~~~~~~~~~~~~~~~:>   Python Neo {version}
+""".strip("\n")
+SNAKE = "~~~~:>"  # starts the line for each file that compiled
+
+
+class _Version(argparse.Action):
+    """The logo on a terminal; a plain ``neoc X.Y.Z`` line for scripts."""
+
+    def __init__(self, option_strings, dest=argparse.SUPPRESS, default=argparse.SUPPRESS, help=None):
+        super().__init__(option_strings, dest=dest, default=default, nargs=0, help=help)
+
+    def __call__(self, parser, namespace, values, option_string=None):
+        if sys.stdout.isatty():
+            print(LOGO.format(version=neo.__version__))
+        else:
+            print(f"neoc {neo.__version__}")
+        parser.exit()
+
 
 def _sources(names: list[str], parser: argparse.ArgumentParser) -> list[Path]:
     found = []
@@ -49,6 +74,12 @@ def _report(result: CompileResult, path: Path, source: str, explain: bool, out) 
             print(explanation.format(str(path)), file=out)
 
 
+def _success(path: Path, target: str, result: CompileResult) -> str:
+    count = len(result.warnings)
+    note = f" ({count} warning{'s' if count != 1 else ''})" if count else ""
+    return f"{SNAKE}  {path} -> {target}  ok{note}"
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="neoc", description="Compile Python Neo (.neo.py) files to plain Python.")
     parser.add_argument("sources", nargs="+", metavar="SOURCE", help=f"{SUFFIX} files or directories containing them")
@@ -59,13 +90,16 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="give mutable default arguments a fresh object per call instead of warning (NEO1004)",
     )
-    parser.add_argument("--version", action="version", version=f"neoc {neo.__version__}")
+    parser.add_argument("-q", "--quiet", action="store_true", help="do not print a line for each compiled file")
+    parser.add_argument("--version", action=_Version, help="show the version and exit")
     args = parser.parse_args(argv)
 
     paths = _sources(args.sources, parser)
     if args.output and len(paths) != 1:
         parser.error("-o/--output needs exactly one source file")
 
+    # The success line goes to stderr, and only to a person at a terminal.
+    announce = not args.quiet and sys.stderr.isatty()
     failed = False
     for path in paths:
         raw = path.read_bytes()
@@ -79,9 +113,14 @@ def main(argv: list[str] | None = None) -> int:
             continue
         if to_stdout:
             sys.stdout.write(result.code)
+            sys.stdout.flush()
+            written = "(stdout)"
         else:
             target = Path(args.output) if args.output else path.with_name(path.name[: -len(SUFFIX)] + ".py")
             target.write_text(result.code, encoding=encoding, newline="")
+            written = str(target)
+        if announce:
+            print(_success(path, written, result), file=sys.stderr)
     return 1 if failed else 0
 
 

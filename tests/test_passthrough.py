@@ -57,6 +57,13 @@ class Passthrough(NeoTestCase):
         self.assertEqual([(d.code, d.line, d.col) for d in result.errors], [("NEO0001", 1, 9)])
 
 
+class Terminal(io.StringIO):
+    """Output that claims to be a terminal, as when a person runs neoc."""
+
+    def isatty(self):
+        return True
+
+
 class Cli(unittest.TestCase):
     def setUp(self):
         self.dir = Path(tempfile.mkdtemp())
@@ -67,8 +74,8 @@ class Cli(unittest.TestCase):
         path.write_text(text, encoding="utf-8")
         return path
 
-    def run_main(self, *args: str) -> tuple[int, str, str]:
-        out, err = io.StringIO(), io.StringIO()
+    def run_main(self, *args: str, tty: bool = False) -> tuple[int, str, str]:
+        out, err = (Terminal(), Terminal()) if tty else (io.StringIO(), io.StringIO())
         with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
             try:
                 code = main(list(args))
@@ -101,6 +108,27 @@ class Cli(unittest.TestCase):
         self.assertEqual(code, 0)
         self.assertIn("if xs is None:", out)
         self.assertIn("explain: mutable default of 'xs' ([]) is now created on every call", err)
+
+    def test_a_success_line_on_a_terminal(self):
+        clean = self.write("clean.neo.py", "x = 1\n")
+        warned = self.write("warned.neo.py", "def f(xs=[]):\n    return xs\n")
+        code, _, err = self.run_main(str(clean), str(warned), tty=True)
+        self.assertEqual(code, 0)
+        self.assertIn(f"~~~~:>  {clean} -> {self.dir / 'clean.py'}  ok\n", err)
+        self.assertIn(f"~~~~:>  {warned} -> {self.dir / 'warned.py'}  ok (1 warning)\n", err)
+
+    def test_no_success_line_when_quiet_piped_or_failed(self):
+        clean = self.write("clean.neo.py", "x = 1\n")
+        bad = self.write("bad.neo.py", "val x = 1\nx = 2\n")
+        self.assertNotIn("~~~~:>", self.run_main(str(clean), "-q", tty=True)[2])
+        self.assertNotIn("~~~~:>", self.run_main(str(clean))[2])
+        self.assertNotIn("~~~~:>", self.run_main(str(bad), tty=True)[2])
+
+    def test_version_shows_the_logo_only_on_a_terminal(self):
+        _, out, _ = self.run_main("--version", tty=True)
+        self.assertIn("|_| \\_|_____\\___/", out)
+        self.assertIn(":>   Python Neo 0.1.0", out)
+        self.assertEqual(self.run_main("--version")[1], "neoc 0.1.0\n")
 
     def test_rejects_files_that_are_not_neo(self):
         source = self.write("plain.py", "x = 1\n")

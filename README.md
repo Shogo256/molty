@@ -1,3 +1,12 @@
+```text
+ _   _ _____ ___
+| \ | | ____/ _ \
+|  \| |  _|| | | |
+| |\  | |__| |_| |
+|_| \_|_____\___/
+ ~~~~~~~~~~~~~~~~:>   Python Neo
+```
+
 # Python Neo
 
 Python Neo is a strict superset of Python. Every valid Python file is a valid
@@ -75,10 +84,20 @@ neoc src/                    # every *.neo.py under src/
 neoc app.neo.py -o -         # print to stdout
 neoc app.neo.py --explain    # list every rewrite neoc made
 neoc app.neo.py --rewrite-defaults   # fix mutable defaults instead of warning
+neoc app.neo.py -q           # no success line
+neoc --version
 ```
 
 `neoc` exits with 1 if any file has errors. Warnings are printed, but the
-`.py` file is still written.
+`.py` file is still written. At a terminal, each file that compiles gets one
+line on stderr:
+
+```text
+~~~~:>  app.neo.py -> app.py  ok (2 warnings)
+```
+
+When the output is piped, as in CI, that line is left out, and
+`neoc --version` prints a plain `neoc 0.1.0` instead of the logo.
 
 ## What Neo adds
 
