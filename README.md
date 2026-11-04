@@ -73,20 +73,20 @@ MOLTY_STDLIB=1 python -m unittest discover -s tests -p test_stdlib_superset.py
 
 ## Install and run
 
-Not on PyPI yet. From a checkout:
-
 ```bash
-pip install -e .
+pip install molty
 ```
 
+To work on Molty itself, install it from a checkout with `pip install -e .`.
+
 ```bash
-moltyc app.molty.py              # writes app.py next to it
-moltyc src/                    # every *.molty.py under src/
-moltyc app.molty.py -o -         # print to stdout
-moltyc app.molty.py --explain    # list every rewrite moltyc made
+moltyc app.molty.py                      # writes app.py next to it
+moltyc src/                              # every *.molty.py under src/
+moltyc app.molty.py -o -                 # print to stdout
+moltyc app.molty.py --explain            # list every rewrite moltyc made
 moltyc app.molty.py --rewrite-defaults   # fix mutable defaults instead of warning
-moltyc app.molty.py -q           # no success line
-moltyc app.molty.py --force      # overwrite an app.py that moltyc did not write
+moltyc app.molty.py -q                   # no success line
+moltyc app.molty.py --force              # overwrite an app.py that moltyc did not write
 moltyc --version
 ```
 

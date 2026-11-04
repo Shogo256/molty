@@ -3,4 +3,4 @@
 from molty.runtime import checked, isolated, scope
 
 __all__ = ["checked", "isolated", "scope"]
-__version__ = "0.1.1"
+__version__ = "0.1.2"
