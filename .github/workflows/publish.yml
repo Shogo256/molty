@@ -15,8 +15,8 @@ jobs:
       matrix:
         python-version: ["3.11", "3.12", "3.13", "3.14"]
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
         with:
           python-version: ${{ matrix.python-version }}
       - run: python -W error::RuntimeWarning -m unittest discover -s tests
@@ -25,8 +25,8 @@ jobs:
     needs: test
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.14"
       - name: Check that the tag matches the version in pyproject.toml
@@ -43,13 +43,34 @@ jobs:
       - run: python -m pip install build twine
       - run: python -m build
       - run: python -m twine check dist/*
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: dist
           path: dist/
 
-  publish:
+  # Install what was built, as a user would, before anything is published.
+  # It also runs in a dry run, so the download step is tested there too.
+  check-dist:
     needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          name: dist
+          path: dist/
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.14"
+      - name: Install the wheel and compile a file with it
+        run: |
+          python -m pip install dist/*.whl
+          moltyc --version
+          printf 'val xs = [1, 2]\nprint(xs)\n' > hello.molty.py
+          moltyc hello.molty.py
+          test "$(python hello.py)" = "(1, 2)"
+
+  publish:
+    needs: check-dist
     if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
     environment:
@@ -58,7 +79,7 @@ jobs:
     permissions:
       id-token: write  # trusted publishing: PyPI trusts this workflow, so no token is stored
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           name: dist
           path: dist/
@@ -70,7 +91,7 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           name: dist
           path: dist/
